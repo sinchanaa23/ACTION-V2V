@@ -154,7 +154,7 @@ def test_save_load_round_trip(tmp_path: Path) -> None:
     reason="needs the [sim] extras and network access; set V2V_NETWORK_TESTS=1",
 )
 def test_hebbal_gazetteer(tmp_path: Path) -> None:
-    from v2v.sim.gazetteer import _shape_heading, angle_diff, build_gazetteer
+    from v2v.sim.gazetteer import angle_diff, build_gazetteer, shape_heading
     from v2v.sim.osm_network import CORRIDORS, read_net
 
     gazetteer = build_gazetteer(CORRIDORS["hebbal"], tmp_path)
@@ -165,7 +165,7 @@ def test_hebbal_gazetteer(tmp_path: Path) -> None:
     net = read_net(tmp_path / "hebbal" / "hebbal.net.xml")
     for edge in [e for e in net.getEdges() if e.getName() == "Bellary Road"][:3]:
         shape = edge.getLanes()[0].getShape()
-        heading = _shape_heading(shape, 0.0)
+        heading = shape_heading(shape, 0.0)
         reporter = VehicleState(
             vehicle_id="rep",
             x=shape[0][0],
@@ -178,5 +178,5 @@ def test_hebbal_gazetteer(tmp_path: Path) -> None:
         loc = gazetteer.resolve("bridge ke paas", reporter)
         assert loc is not None
         loc_shape = net.getEdge(loc.edge_id).getLanes()[0].getShape()
-        assert angle_diff(_shape_heading(loc_shape, loc.pos_m), heading) <= 90
+        assert angle_diff(shape_heading(loc_shape, loc.pos_m), heading) <= 90
         assert gazetteer.resolve("kahin pe", reporter) is None
