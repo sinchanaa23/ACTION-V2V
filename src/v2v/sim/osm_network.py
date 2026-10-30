@@ -82,6 +82,18 @@ def _fetch(request: urllib.request.Request, attempts: int, backoff_s: float) -> 
     raise AssertionError("unreachable")
 
 
+def overpass_download(
+    query: str, out_path: Path, attempts: int = 5, backoff_s: float = 10.0
+) -> bytes:
+    """Run an Overpass query and save the XML response to ``out_path``."""
+    data = urllib.parse.urlencode({"data": query}).encode()
+    request = urllib.request.Request(OVERPASS_URL, data=data, headers={"User-Agent": USER_AGENT})
+    body = _fetch(request, attempts, backoff_s)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(body)
+    return body
+
+
 def download_osm(
     corridor: Corridor,
     out_path: Path,
@@ -89,13 +101,10 @@ def download_osm(
     attempts: int = 5,
     backoff_s: float = 10.0,
 ) -> Path:
-    data = urllib.parse.urlencode({"data": overpass_query(corridor.bbox, snapshot)}).encode()
-    request = urllib.request.Request(OVERPASS_URL, data=data, headers={"User-Agent": USER_AGENT})
-    body = _fetch(request, attempts, backoff_s)
+    body = overpass_download(overpass_query(corridor.bbox, snapshot), out_path, attempts, backoff_s)
     if b"<way" not in body:
+        out_path.unlink()
         raise RuntimeError(f"Overpass returned no roads for {corridor.name}: {body[:300]!r}")
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_bytes(body)
     return out_path
 
 

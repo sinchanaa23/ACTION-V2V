@@ -17,7 +17,8 @@ Real road network (needs the `sim` extras; output in git-ignored `sim_out/`):
 ```bash
 pip install -e ".[dev,sim]"
 python -m v2v.sim.osm_network --corridor hebbal     # OSM snapshot 2026-10-01, left-hand traffic
-V2V_NETWORK_TESTS=1 pytest tests/test_osm_network.py  # live download + SUMO load check
+python -m v2v.sim.gazetteer --corridor hebbal      # real OSM landmarks -> network edges
+V2V_NETWORK_TESTS=1 pytest tests/test_osm_network.py tests/test_gazetteer.py  # live checks
 ```
 
 Configs: `baseline_a`, `baseline_b`, `proposed`, `ablation_direction`,
