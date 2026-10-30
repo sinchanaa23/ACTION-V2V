@@ -62,3 +62,8 @@ mypy_path = "src"
 files = ["src/v2v"]
 strict = true
 plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+# SUMO's Python tools ship without type hints and aren't installed in the base CI job.
+module = ["sumo", "sumolib", "sumolib.*", "traci", "traci.*", "libsumo"]
+ignore_missing_imports = true

@@ -12,6 +12,14 @@ pytest
 python -m v2v.pipeline --config proposed
 ```
 
+Real road network (needs the `sim` extras; output in git-ignored `sim_out/`):
+
+```bash
+pip install -e ".[dev,sim]"
+python -m v2v.sim.osm_network --corridor hebbal     # OSM snapshot 2026-10-01, left-hand traffic
+V2V_NETWORK_TESTS=1 pytest tests/test_osm_network.py  # live download + SUMO load check
+```
+
 Configs: `baseline_a`, `baseline_b`, `proposed`, `ablation_direction`,
 `ablation_confidence`. Right now the pipeline runs on stubs and a toy two-way road
 (`src/v2v/sim/toy_world.py`); each stub is replaced by its owner's PR.
