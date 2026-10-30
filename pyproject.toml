@@ -30,6 +30,8 @@ sim = [
     "eclipse-sumo>=1.20",
     "traci>=1.20",
     "sumolib>=1.20",
+    "pyproj>=3.6",
+    "rtree>=1.2",
     "osmnx>=1.9",
     "shapely>=2.0",
     "networkx>=3.2",
@@ -62,3 +64,8 @@ mypy_path = "src"
 files = ["src/v2v"]
 strict = true
 plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+# SUMO's Python tools ship without type hints and aren't installed in the base CI job.
+module = ["sumo", "sumolib", "sumolib.*", "traci", "traci.*", "libsumo", "pyproj"]
+ignore_missing_imports = true
