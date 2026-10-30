@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+.pixi/
+
+# Notebooks are for exploration only; code lives in .py files
+.ipynb_checkpoints/
+
+# Data: raw scraped dumps never go in git
+data/raw/
+
+# Credentials
+.env
+praw.ini
+client_secret*.json
+service_account*.json
+*credentials*.json
+
+# Generated SUMO files and simulation output
+*.net.xml
+*.rou.xml
+*.sumocfg
+*.osm
+sim_out/
+
+# Models (Git LFS or shared Drive)
+models/
+*.pt
+*.safetensors
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
