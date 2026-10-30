@@ -63,6 +63,7 @@ def test_noisy_scenario_through_sumo_and_pipeline(tmp_path: Path) -> None:
     from v2v.confidence.dedup import HazardTracker
     from v2v.contracts import DriverReport, World
     from v2v.experiments import CONFIGS
+    from v2v.geocast import circular, directional
     from v2v.pipeline import process_report
     from v2v.sim.osm_network import CORRIDORS
     from v2v.sim.scenarios import generate
@@ -78,6 +79,11 @@ def test_noisy_scenario_through_sumo_and_pipeline(tmp_path: Path) -> None:
             for slot, t_pass in sumo.due_reports():
                 fired.append(slot.role)
                 assert sumo.time_s >= t_pass + slot.delay_s
+                # Every reporter has a state to report from, even one that has
+                # since driven out of the network (the stale report, ~10 min on).
+                reporter = sumo.vehicle(slot.reporter_id)
+                assert reporter.vehicle_id == slot.reporter_id
+                assert not world.will_reach(slot.reporter_id, spec.hazard)
                 if slot.role != "original":
                     continue
                 # Event in progress: the blocking vehicle shows up on the sensors.
@@ -102,6 +108,19 @@ def test_noisy_scenario_through_sumo_and_pipeline(tmp_path: Path) -> None:
                 )
                 assert set(result.relevant_vehicle_ids) == set(approaching)
                 assert result.warning is not None and result.deliveries
+                # On the real map: directional geocast narrows the circular area
+                # and never picks a vehicle already past the hazard on its road.
+                hazard = result.assessed.model_copy(update={"location": spec.hazard})
+                now = world.vehicles()
+                chosen = set(directional.select(hazard, now, config.radius_m))
+                around = set(circular.select(hazard, now, config.radius_m))
+                assert chosen and chosen < around
+                past = {
+                    v.vehicle_id
+                    for v in now
+                    if v.edge_id == spec.hazard.edge_id and v.lane_pos_m > spec.hazard.pos_m
+                }
+                assert not chosen & past
     assert sorted(fired) == sorted(s.role for s in spec.slots)
     assert fired.index("contradiction") < fired.index("stale")  # stale arrives last
     assert sumo.hazard_passes and not sumo.teleported

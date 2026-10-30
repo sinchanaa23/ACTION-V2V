@@ -283,10 +283,7 @@ def candidate_sites(net: Any, gz: gazetteer.Gazetteer) -> list[_Site]:
                 continue
             if not has_upstream(edge):
                 continue
-            loc = ResolvedLocation(
-                edge_id=anchor.edge_id, pos_m=anchor.pos_m, x=anchor.x, y=anchor.y, approx=False
-            )
-            opp = opposite_edge(net, loc, anchor.heading_deg)
+            opp = opposite_edge(net, anchor.location(), anchor.heading_deg)
             if opp is None or not has_upstream(opp):
                 continue
             sites.append(_Site(landmark=lm, anchor=anchor, opposite=opp.getID()))
@@ -434,9 +431,7 @@ def build_spec(
     site = rng.choice(list(sites))
     hazard_class = rng.choice(ACTIONABLE)
     anchor = site.anchor
-    hazard = ResolvedLocation(
-        edge_id=anchor.edge_id, pos_m=anchor.pos_m, x=anchor.x, y=anchor.y, approx=False
-    )
+    hazard = anchor.location()
     hazard_edge = net.getEdge(anchor.edge_id)
     opposite = net.getEdge(site.opposite)
     event_start = WARMUP_S
@@ -602,7 +597,7 @@ def toy_scenario(seed: int = 0) -> Scenario:
     return Scenario(
         scenario_id=f"toy-{seed}",
         hazard_location=ResolvedLocation(
-            edge_id="fwd", pos_m=1200.0, x=1200.0, y=0.0, approx=False
+            edge_id="fwd", pos_m=1200.0, x=1200.0, y=0.0, approx=False, heading_deg=90.0
         ),
         event_occurred=True,
         reporter_id="fwd_13",

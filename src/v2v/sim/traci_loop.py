@@ -24,12 +24,16 @@ is never returned by ``vehicles()``.
 import argparse
 import math
 import uuid
+import xml.etree.ElementTree as ET
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 from v2v.contracts import ResolvedLocation, VehicleState
+from v2v.geocast import directional
+from v2v.geocast.directional import RoadGraph
 from v2v.sim import osm_network
 from v2v.sim.gazetteer import Gazetteer
 from v2v.sim.scenarios import ReportSlot, ScenarioSpec
@@ -58,6 +62,19 @@ def passed_point(
         return None
     target = route.index(edge_id)
     return route_index > target or (route_index == target and lane_pos_m >= pos_m)
+
+
+def net_file(sumocfg: Path) -> Path:
+    """The network a .sumocfg points at."""
+    net = ET.parse(sumocfg).getroot().find("input/net-file")
+    if net is None:
+        raise ValueError(f"{sumocfg} names no net-file")
+    return (sumocfg.parent / net.get("value", "")).resolve()
+
+
+@lru_cache(maxsize=4)
+def road_graph(net_path: Path) -> RoadGraph:
+    return RoadGraph.from_sumo_net(osm_network.read_net(net_path))
 
 
 @dataclass
@@ -111,9 +128,13 @@ class SumoWorld:
             "--seed", str(spec.seed),
             *extra_args,
         ]  # fmt: skip
+        # Direction-sensitive geocast works on the public road map of this network.
+        directional.use_road_graph(road_graph(net_file(Path(spec.sumocfg))))
         traci.start(cmd, label=self._label)
         self._t: Any = traci.getConnection(self._label)
         self._tracked: dict[str, _Tracked] = {}
+        self._left: dict[str, _Tracked] = {}
+        """Last known state of vehicles that have driven out of the network."""
         self._slow_zone_saved: dict[str, float] = {}
         self.clock = ReportClock(spec.slots)
         self.hazard_passes: dict[str, float] = {}
@@ -134,7 +155,9 @@ class SumoWorld:
             self._t.vehicle.subscribe(vid, SUBSCRIBED)
             self._tracked[vid] = _Tracked(route=tuple(self._t.vehicle.getRoute(vid)))
         for vid in sim.getArrivedIDList():
-            self._tracked.pop(vid, None)
+            gone = self._tracked.pop(vid, None)
+            if gone is not None and gone.values:
+                self._left[vid] = gone
         self.teleported.update(sim.getStartingTeleportIDList())
         for vid, values in self._t.vehicle.getAllSubscriptionResults().items():
             if vid in self._tracked:
@@ -150,9 +173,12 @@ class SumoWorld:
         ]
 
     def vehicle(self, vehicle_id: str) -> VehicleState:
-        tracked = self._tracked.get(vehicle_id)
+        """Current state; for a vehicle that has already left the network (a
+        late reporter), its last known state there. Such vehicles are never in
+        ``vehicles()`` and never ``will_reach`` anything."""
+        tracked = self._tracked.get(vehicle_id) or self._left.get(vehicle_id)
         if tracked is None or not tracked.values:
-            raise KeyError(f"{vehicle_id} is not in the simulation")
+            raise KeyError(f"{vehicle_id} has not entered the simulation")
         return self._state(vehicle_id, tracked)
 
     def resolve_location(
@@ -188,6 +214,7 @@ class SumoWorld:
     def close(self) -> None:
         if not self._closed:
             self._t.close()
+            directional.use_road_graph(None)
             self._closed = True
 
     # --- Beyond the protocol ----------------------------------------------------
@@ -219,9 +246,11 @@ class SumoWorld:
     def _state(self, vid: str, tracked: _Tracked) -> VehicleState:
         v = tracked.values
         index = v[VAR_ROUTE_INDEX]
-        road = v[VAR_ROAD_ID]
-        edge = road if not road.startswith(":") else tracked.route[index]
-        lane_pos = float(v[VAR_LANEPOSITION]) if not road.startswith(":") else 0.0
+        edge, lane_pos = v[VAR_ROAD_ID], float(v[VAR_LANEPOSITION])
+        if edge.startswith(":"):
+            # Inside a junction: map-match to the road it is turning onto, at its start.
+            index = min(index + 1, len(tracked.route) - 1)
+            edge, lane_pos = tracked.route[index], 0.0
         x, y = v[VAR_POSITION]
         return VehicleState(
             vehicle_id=vid,
