@@ -116,7 +116,8 @@ def _spec(tmp_path: Path, effect: str = "lane_block", occurred: bool = True) -> 
         approach_route=("a", "h", "b"),
         opposing_route=("c", "-h", "d"),
         slots=(slot,),
-        sumocfg=str(tmp_path / "scenario.sumocfg"),
+        sumocfg=(tmp_path / "scenario.sumocfg").as_posix(),
+        gazetteer=(tmp_path / "gazetteer.json").as_posix(),
     )
 
 
