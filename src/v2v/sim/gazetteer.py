@@ -248,7 +248,7 @@ def pick_anchor(lm: Landmark, reporter: VehicleState) -> Anchor:
     return min(lm.anchors, key=key)
 
 
-def _shape_heading(shape: list[tuple[float, float]], offset: float) -> float:
+def shape_heading(shape: list[tuple[float, float]], offset: float) -> float:
     walked = 0.0
     for (x0, y0), (x1, y1) in zip(shape, shape[1:], strict=False):
         length = math.dist((x0, y0), (x1, y1))
@@ -408,7 +408,7 @@ def anchor_on(edge: Any, x: float, y: float) -> tuple[float, Anchor]:
         pos_m=round(pos, 2),
         x=round(px, 2),
         y=round(py, 2),
-        heading_deg=round(_shape_heading(shape, offset), 1),
+        heading_deg=round(shape_heading(shape, offset), 1),
     )
     return math.dist((x, y), (px, py)), anchor
 
