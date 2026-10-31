@@ -20,6 +20,8 @@ python -m v2v.sim.osm_network --corridor hebbal     # OSM snapshot 2026-10-01, l
 python -m v2v.sim.gazetteer --corridor hebbal      # real OSM landmarks -> network edges
 python -m v2v.sim.scenarios --corridor hebbal --seeds 0 1   # 3 conditions x 3 densities, SUMO-validated
 python -m v2v.sim.traci_loop sim_out/scenarios/hebbal/noisy-medium-s0   # play one, log reports
+python -m v2v.sim.recorder sim_out/scenarios/hebbal/*-s0   # record runs for the dashboard
+pip install -e ".[dashboard]" && streamlit run dashboard/app.py
 V2V_NETWORK_TESTS=1 pytest tests/test_osm_network.py tests/test_gazetteer.py \
     tests/test_scenarios.py tests/test_traci_loop.py
 ```

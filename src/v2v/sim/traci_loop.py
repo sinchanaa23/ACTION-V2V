@@ -105,6 +105,9 @@ class ReportClock:
 class _Tracked:
     route: tuple[str, ...]
     values: dict[int, Any] = field(default_factory=dict)
+    """Latest subscription values from while the vehicle was on a road."""
+    on_road: bool = False
+    """False while SUMO is teleporting it out of a jam (no road, no position)."""
 
 
 class SumoWorld:
@@ -160,8 +163,12 @@ class SumoWorld:
                 self._left[vid] = gone
         self.teleported.update(sim.getStartingTeleportIDList())
         for vid, values in self._t.vehicle.getAllSubscriptionResults().items():
-            if vid in self._tracked:
-                self._tracked[vid].values = values
+            tracked = self._tracked.get(vid)
+            if tracked is None:
+                continue
+            tracked.on_road = values.get(VAR_ROAD_ID, "") != ""
+            if tracked.on_road:  # keep the last on-road state through a teleport
+                tracked.values = values
         self._update_passes()
         self._apply_effects()
 
@@ -169,13 +176,13 @@ class SumoWorld:
         return [
             self._state(vid, tracked)
             for vid, tracked in self._tracked.items()
-            if tracked.values and not vid.startswith(HAZARD_PREFIX)
+            if tracked.on_road and not vid.startswith(HAZARD_PREFIX)
         ]
 
     def vehicle(self, vehicle_id: str) -> VehicleState:
-        """Current state; for a vehicle that has already left the network (a
-        late reporter), its last known state there. Such vehicles are never in
-        ``vehicles()`` and never ``will_reach`` anything."""
+        """Current state. For a vehicle that has left the network (a late
+        reporter) or is mid-teleport, its last on-road state; such vehicles
+        are never in ``vehicles()``."""
         tracked = self._tracked.get(vehicle_id) or self._left.get(vehicle_id)
         if tracked is None or not tracked.values:
             raise KeyError(f"{vehicle_id} has not entered the simulation")
@@ -191,7 +198,7 @@ class SumoWorld:
         count = 0
         for tracked in self._tracked.values():
             v = tracked.values
-            if not v or v[VAR_SPEED] >= SLOW_SPEED_MPS:
+            if not tracked.on_road or v[VAR_SPEED] >= SLOW_SPEED_MPS:
                 continue
             x, y = v[VAR_POSITION]
             if math.dist((x, y), (location.x, location.y)) <= radius_m:
@@ -218,6 +225,11 @@ class SumoWorld:
             self._closed = True
 
     # --- Beyond the protocol ----------------------------------------------------
+
+    def lonlat(self, x: float, y: float) -> tuple[float, float]:
+        """Network coordinates to (longitude, latitude)."""
+        lon, lat = self._t.simulation.convertGeo(x, y)
+        return float(lon), float(lat)
 
     def run_until(self, t: float) -> None:
         while self.time_s < t:
