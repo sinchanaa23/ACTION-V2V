@@ -117,6 +117,16 @@ class Anchor(_Model):
     y: float
     heading_deg: float
 
+    def location(self) -> ResolvedLocation:
+        return ResolvedLocation(
+            edge_id=self.edge_id,
+            pos_m=self.pos_m,
+            x=self.x,
+            y=self.y,
+            approx=False,
+            heading_deg=self.heading_deg % 360.0,
+        )
+
 
 class Landmark(_Model):
     landmark_id: str
@@ -161,9 +171,7 @@ class Gazetteer(_Model):
         if not scored:
             return None
         anchor = min(scored, key=lambda pair: pair[0])[1]
-        return ResolvedLocation(
-            edge_id=anchor.edge_id, pos_m=anchor.pos_m, x=anchor.x, y=anchor.y, approx=False
-        )
+        return anchor.location()
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

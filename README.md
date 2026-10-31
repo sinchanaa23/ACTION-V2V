@@ -19,7 +19,9 @@ pip install -e ".[dev,sim]"
 python -m v2v.sim.osm_network --corridor hebbal     # OSM snapshot 2026-10-01, left-hand traffic
 python -m v2v.sim.gazetteer --corridor hebbal      # real OSM landmarks -> network edges
 python -m v2v.sim.scenarios --corridor hebbal --seeds 0 1   # 3 conditions x 3 densities, SUMO-validated
-V2V_NETWORK_TESTS=1 pytest tests/test_osm_network.py tests/test_gazetteer.py tests/test_scenarios.py
+python -m v2v.sim.traci_loop sim_out/scenarios/hebbal/noisy-medium-s0   # play one, log reports
+V2V_NETWORK_TESTS=1 pytest tests/test_osm_network.py tests/test_gazetteer.py \
+    tests/test_scenarios.py tests/test_traci_loop.py
 ```
 
 Configs: `baseline_a`, `baseline_b`, `proposed`, `ablation_direction`,

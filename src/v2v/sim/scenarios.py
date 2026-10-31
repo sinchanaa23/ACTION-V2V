@@ -125,6 +125,8 @@ class ScenarioSpec(_Model):
     opposing_route: tuple[str, ...]
     slots: tuple[ReportSlot, ...]
     sumocfg: str
+    gazetteer: str
+    """Path of the corridor's gazetteer.json, used to resolve report locations."""
 
     def to_scenario(self) -> Scenario:
         """The contract view: ground truth plus the first report slot."""
@@ -281,10 +283,7 @@ def candidate_sites(net: Any, gz: gazetteer.Gazetteer) -> list[_Site]:
                 continue
             if not has_upstream(edge):
                 continue
-            loc = ResolvedLocation(
-                edge_id=anchor.edge_id, pos_m=anchor.pos_m, x=anchor.x, y=anchor.y, approx=False
-            )
-            opp = opposite_edge(net, loc, anchor.heading_deg)
+            opp = opposite_edge(net, anchor.location(), anchor.heading_deg)
             if opp is None or not has_upstream(opp):
                 continue
             sites.append(_Site(landmark=lm, anchor=anchor, opposite=opp.getID()))
@@ -421,6 +420,7 @@ def build_spec(
     seed: int,
     sumocfg: Path,
     attempt: int = 0,
+    gazetteer_path: Path = Path(),
 ) -> ScenarioSpec:
     """Choose a site and hazard for (condition, seed) and plan every vehicle.
 
@@ -431,9 +431,7 @@ def build_spec(
     site = rng.choice(list(sites))
     hazard_class = rng.choice(ACTIONABLE)
     anchor = site.anchor
-    hazard = ResolvedLocation(
-        edge_id=anchor.edge_id, pos_m=anchor.pos_m, x=anchor.x, y=anchor.y, approx=False
-    )
+    hazard = anchor.location()
     hazard_edge = net.getEdge(anchor.edge_id)
     opposite = net.getEdge(site.opposite)
     event_start = WARMUP_S
@@ -489,7 +487,8 @@ def build_spec(
         approach_route=through(hazard_edge),
         opposing_route=through(opposite),
         slots=tuple(slots),
-        sumocfg=str(sumocfg),
+        sumocfg=sumocfg.as_posix(),
+        gazetteer=gazetteer_path.as_posix(),
     )
 
 
@@ -551,6 +550,7 @@ def generate(
     run fails ``check_run`` a different site is drawn, up to MAX_ATTEMPTS.
     """
     gz = gazetteer.build_gazetteer(corridor, out_dir)
+    gz_path = out_dir / corridor.name / "gazetteer.json"
     net_path = osm_network.build_network(corridor, out_dir)
     net = osm_network.read_net(net_path)
     sites = candidate_sites(net, gz)
@@ -572,7 +572,9 @@ def generate(
                     work = root / f"{condition}-{density}-s{seed}"
                     work.mkdir(parents=True, exist_ok=True)
                     cfg = work / "scenario.sumocfg"
-                    spec = build_spec(net, sites, corridor, condition, density, seed, cfg, attempt)
+                    spec = build_spec(
+                        net, sites, corridor, condition, density, seed, cfg, attempt, gz_path
+                    )
                     write_scenario_routes(spec, work / "scenario.rou.xml", density)
                     write_sumocfg(
                         cfg, net_path, [backgrounds[density], work / "scenario.rou.xml"], spec
@@ -595,7 +597,7 @@ def toy_scenario(seed: int = 0) -> Scenario:
     return Scenario(
         scenario_id=f"toy-{seed}",
         hazard_location=ResolvedLocation(
-            edge_id="fwd", pos_m=1200.0, x=1200.0, y=0.0, approx=False
+            edge_id="fwd", pos_m=1200.0, x=1200.0, y=0.0, approx=False, heading_deg=90.0
         ),
         event_occurred=True,
         reporter_id="fwd_13",

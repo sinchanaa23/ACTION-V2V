@@ -97,6 +97,9 @@ class ResolvedLocation(_Contract):
     x: float
     y: float
     approx: bool
+    heading_deg: float | None = Field(default=None, ge=0.0, lt=360.0)
+    """Direction of travel on the road at this point (SUMO convention), if known.
+    Direction-sensitive geocast uses it to tell the carriageways apart."""
 
 
 class AssessedHazard(_Contract):
