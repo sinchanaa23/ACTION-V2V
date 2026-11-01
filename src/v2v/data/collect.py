@@ -2,9 +2,17 @@
 
 Each collector returns DriverReport records with PII already scrubbed and
 ``source`` set to the real platform. No collector generates or rewrites text.
+The per-source modules keep extra fields (time, city) in their JSONL output.
 """
 
 from v2v.contracts import DriverReport
+from v2v.data import reddit as reddit_source
+from v2v.data import youtube as youtube_source
+from v2v.data.scrub import scrub
+
+__all__ = ["reddit", "scrub", "survey", "youtube"]
+
+_PAGES_PER_VIDEO = 3
 
 
 def survey(export_csv: str) -> list[DriverReport]:
@@ -13,15 +21,17 @@ def survey(export_csv: str) -> list[DriverReport]:
 
 
 def reddit(subreddits: list[str], limit: int) -> list[DriverReport]:
-    """STUB(P1-02): official API via praw, rate-limited."""
-    raise NotImplementedError("P1-02")
+    """Official API via praw, rate-limited."""
+    cities = {name: reddit_source.SUBREDDIT_CITIES.get(name) for name in subreddits}
+    records = reddit_source.collect(reddit_source.client_from_env(), cities, limit=limit)
+    return [rec.to_report() for rec in records]
 
 
 def youtube(video_ids: list[str]) -> list[DriverReport]:
-    """STUB(P1-02): YouTube Data API v3 comments."""
-    raise NotImplementedError("P1-02")
-
-
-def scrub(text: str) -> str:
-    """STUB(P1-02): remove usernames, phone numbers and plate numbers."""
-    raise NotImplementedError("P1-02")
+    """YouTube Data API v3 comments."""
+    client = youtube_source.client_from_env()
+    return [
+        rec.to_report()
+        for video_id in video_ids
+        for rec in youtube_source.comments_of(client, video_id, _PAGES_PER_VIDEO)
+    ]
