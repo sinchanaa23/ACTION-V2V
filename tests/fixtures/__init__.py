@@ -6,3 +6,4 @@ Every DriverReport built from them must use source="fixture".
 
 ACCIDENT_HINGLISH = "Bhai, aage accident hua hai, bridge ke paas. Slow down!"
 NON_ACTIONABLE = "Traffic is fine today, reached office on time."
+ACCIDENT_NO_LOCATION = "Bhai, aage accident hua hai. Slow down!"

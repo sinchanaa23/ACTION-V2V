@@ -4,7 +4,7 @@ import pkgutil
 import pytest
 
 import v2v
-from tests.fixtures import ACCIDENT_HINGLISH, NON_ACTIONABLE
+from tests.fixtures import ACCIDENT_HINGLISH, ACCIDENT_NO_LOCATION, NON_ACTIONABLE
 from v2v import pipeline
 from v2v.eval.metrics import summarise
 from v2v.eval.runner import run_grid
@@ -36,9 +36,17 @@ def test_non_actionable_report_sends_nothing() -> None:
 
 
 def test_unstated_location_uses_flagged_fallback() -> None:
-    result = pipeline.run(CONFIGS["proposed"], ACCIDENT_HINGLISH, seed=0)
+    result = pipeline.run(CONFIGS["proposed"], ACCIDENT_NO_LOCATION, seed=0)
+    assert result.interpretation.location_text is None
     assert result.assessed.location is not None
     assert result.assessed.location.approx
+
+
+def test_stated_location_is_resolved_not_approximate() -> None:
+    result = pipeline.run(CONFIGS["proposed"], ACCIDENT_HINGLISH, seed=0)
+    assert result.interpretation.location_text == "bridge"
+    assert result.assessed.location is not None
+    assert not result.assessed.location.approx
 
 
 def test_runner_rows() -> None:
