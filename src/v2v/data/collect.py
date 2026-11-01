@@ -5,8 +5,11 @@ Each collector returns DriverReport records with PII already scrubbed and
 The per-source modules keep extra fields (time, city) in their JSONL output.
 """
 
+from pathlib import Path
+
 from v2v.contracts import DriverReport
 from v2v.data import reddit as reddit_source
+from v2v.data import survey as survey_source
 from v2v.data import youtube as youtube_source
 from v2v.data.scrub import scrub
 
@@ -16,8 +19,8 @@ _PAGES_PER_VIDEO = 3
 
 
 def survey(export_csv: str) -> list[DriverReport]:
-    """STUB(P1-01): consent-based driver survey export."""
-    raise NotImplementedError("P1-01")
+    """Consent-based driver survey export."""
+    return [rec.to_report() for rec in survey_source.read_responses(Path(export_csv))]
 
 
 def reddit(subreddits: list[str], limit: int) -> list[DriverReport]:
