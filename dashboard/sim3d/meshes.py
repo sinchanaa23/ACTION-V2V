@@ -2,11 +2,12 @@
 """Turn the real corridor (``v2v.sim.world3d.Scene``) into a few big meshes. Owner: P4.
 
 Everything static is merged into a handful of vertex-coloured meshes with the
-lighting baked into the colours, drawn with Ursina's unlit shader: cheap
+lighting baked into the colours, drawn unlit with distance haze (atmosphere.fog_shader): cheap
 enough for integrated graphics. Roads, flyovers, junctions, buildings, water
 and parks are real (SUMO network + OpenStreetMap). Street lamps along the
-main roads and trees inside the real parks are decorative placements, since
-the public OSM server cannot serve those nodes for the snapshot date.
+main roads, trees inside the real parks and lit windows are decorative
+placements, since the public OSM server cannot serve those nodes for the
+snapshot date and OSM has no windows.
 """
 
 import math
@@ -14,10 +15,10 @@ import random
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 
+from atmosphere import fog_shader
 from geom import Point2, Point3, along, ccw, dashes, scatter, strip, to_ursina
 from panda3d.core import TransparencyAttrib, Triangulator
 from ursina import Entity, Mesh, Vec3, color
-from ursina.shaders import unlit_shader
 
 from v2v.sim.world3d import Lane, Scene
 
@@ -26,22 +27,27 @@ MAIN_ROADS = {"motorway", "trunk", "primary", "trunk_link", "primary_link", "mot
 LIGHT = (-0.55, 0.8)
 """Direction the moonlight comes from (x, y), for baked wall shading."""
 
-ASPHALT_MAIN = (0.105, 0.115, 0.14)
-ASPHALT = (0.085, 0.09, 0.105)
-JUNCTION = (0.095, 0.1, 0.12)
-MARKING = (0.3, 0.33, 0.37)
-EDGE_LINE = (0.22, 0.25, 0.3)
+ASPHALT_MAIN = (0.13, 0.148, 0.185)
+ASPHALT = (0.075, 0.085, 0.105)
+JUNCTION = (0.085, 0.094, 0.115)
+MARKING = (0.36, 0.4, 0.45)
+EDGE_LINE = (0.2, 0.24, 0.3)
 DECK_GLOW = (0.0, 0.85, 1.0)
-CONCRETE = (0.16, 0.17, 0.19)
-WALL = (0.085, 0.1, 0.13)
+ROAD_GLOW = (0.15, 0.55, 1.0)
+STREET_GLOW = (0.1, 0.32, 0.6)
+CONCRETE = (0.15, 0.165, 0.19)
+WALL = (0.08, 0.098, 0.13)
 ROOF = (0.12, 0.14, 0.18)
-WATER = (0.02, 0.07, 0.13)
-PARK = (0.035, 0.07, 0.05)
-GROUND = (0.03, 0.034, 0.042)
-GRID = (0.0, 0.32, 0.42)
-TREE = (0.05, 0.16, 0.1)
-TRUNK = (0.12, 0.09, 0.07)
+WATER = (0.016, 0.05, 0.092)
+WATER_EDGE = (0.1, 0.35, 0.55)
+PARK = (0.026, 0.055, 0.045)
+GROUND = (0.026, 0.032, 0.044)
+TREE = (0.04, 0.13, 0.09)
+TRUNK = (0.1, 0.08, 0.065)
 LAMP = (1.0, 0.62, 0.25)
+WINDOW_WARM = (1.0, 0.66, 0.34)
+WINDOW_COOL = (0.5, 0.74, 1.0)
+FLOOR_M = 3.2
 
 
 class Builder:
@@ -74,6 +80,51 @@ class Builder:
         self._v += [Vec3(*a), Vec3(*b), Vec3(*c), Vec3(*d)]
         self._t += [i, i + 1, i + 2, i, i + 2, i + 3]
         self._c += [color.rgba(*rgb, alpha)] * 4
+
+    def shaded(
+        self,
+        a: Point3,
+        b: Point3,
+        c: Point3,
+        d: Point3,
+        low: Sequence[float],
+        high: Sequence[float],
+    ) -> None:
+        """A wall quad, ``a``/``d`` at the bottom in ``low`` and ``b``/``c`` at the top in ``high``."""
+        self._room(4)
+        i = len(self._v)
+        self._v += [Vec3(*a), Vec3(*b), Vec3(*c), Vec3(*d)]
+        self._t += [i, i + 1, i + 2, i, i + 2, i + 3]
+        lo, hi = color.rgba(*low, 1), color.rgba(*high, 1)
+        self._c += [lo, hi, hi, lo]
+
+    def fade(
+        self, inner: Sequence[Point3], outer: Sequence[Point3], rgb: Sequence[float], alpha: float
+    ) -> None:
+        """A strip lit at ``alpha`` along ``inner`` and fading to nothing at ``outer``."""
+        on, off = color.rgba(*rgb, alpha), color.rgba(*rgb, 0.0)
+        for a, b, c, d in zip(inner, inner[1:], outer[1:], outer, strict=False):
+            self._room(4)
+            i = len(self._v)
+            self._v += [Vec3(*a), Vec3(*b), Vec3(*c), Vec3(*d)]
+            self._t += [i, i + 1, i + 2, i, i + 2, i + 3]
+            self._c += [on, on, off, off]
+
+    def ribbon(
+        self,
+        line: Sequence[Point3],
+        half: float,
+        rgb: Sequence[float],
+        alpha: float,
+        origin: Point2,
+        lift: float = 0.0,
+    ) -> None:
+        """Soft light along a polyline (SUMO coords): brightest on it, gone ``half`` metres either side.
+        Wide and soft, so it never breaks into dots in the distance the way thin lines do."""
+        centre = _u(line, origin, lift)
+        left, right = strip(line, half, -half)
+        self.fade(centre, _u(left, origin, lift), rgb, alpha)
+        self.fade(centre, _u(right, origin, lift), rgb, alpha)
 
     def band(
         self,
@@ -134,7 +185,7 @@ class Builder:
     def entities(self, see_through: bool = False, **kwargs: object) -> list[Entity]:
         self.flush()
         out = [
-            Entity(model=m, shader=unlit_shader, double_sided=True, **kwargs)  # type: ignore[arg-type]
+            Entity(model=m, shader=fog_shader, double_sided=True, **kwargs)  # type: ignore[arg-type]
             for m in self.meshes
         ]
         if see_through:
@@ -165,7 +216,7 @@ def lanes_by_edge(scene: Scene) -> dict[str, list[Lane]]:
 
 
 def build_roads(scene: Scene, origin: Point2) -> tuple[Builder, Builder]:
-    """Asphalt, junctions, markings and flyover structure; and the neon deck edges."""
+    """Asphalt, junctions, markings and flyover structure; and the light along decks and highways."""
     solid, glow = Builder(), Builder()
     for poly, z in zip(scene.junctions, scene.junction_z, strict=True):
         solid.polygon(poly, z + 0.06, JUNCTION, origin)
@@ -182,16 +233,28 @@ def build_roads(scene: Scene, origin: Point2) -> tuple[Builder, Builder]:
                     a, b = strip(dash, 0.08, -0.08)
                     solid.band(_u(a, origin, 0.1), _u(b, origin, 0.1), MARKING)
         raised = max(p[2] for lane in lanes for p in lane.points) > 1.0
+        # the network itself glows faintly, so it reads as the centrepiece from afar
+        width = sum(lane.width_m for lane in lanes)
+        mid = lanes[len(lanes) // 2].points
+        glow.ribbon(
+            mid,
+            width / 2 + (7.0 if main else 3.5),
+            ROAD_GLOW if main else STREET_GLOW,
+            0.26 if main else 0.1,
+            origin,
+            0.14,
+        )
         outer_right = strip(lanes[0].points, lanes[0].width_m / 2, -lanes[0].width_m / 2)[1]
         outer_left = strip(lanes[-1].points, lanes[-1].width_m / 2, -lanes[-1].width_m / 2)[0]
         for side in (outer_right, outer_left):
             a, b = strip(side, 0.07, -0.07)
             solid.band(_u(a, origin, 0.1), _u(b, origin, 0.1), EDGE_LINE)
+            if main and not raised:  # light along the highway edges
+                glow.ribbon(side, 1.1, ROAD_GLOW, 0.75, origin, 0.12)
             if raised:  # parapet with a neon strip along the flyover deck
                 top = [(x, y, z + 1.0) for x, y, z in side]
                 solid.band(_u(side, origin), _u(top, origin), CONCRETE)
-                ga, gb = strip(top, 0.12, -0.12)
-                glow.band(_u(ga, origin, 0.02), _u(gb, origin, 0.02), DECK_GLOW)
+                glow.ribbon(top, 0.6, DECK_GLOW, 0.9, origin, 0.02)
         if raised:
             for (x, y, z), heading in along(lanes[0].points, 28.0, 10.0):
                 if z > 2.5:
@@ -203,48 +266,18 @@ def build_roads(scene: Scene, origin: Point2) -> tuple[Builder, Builder]:
     return solid, glow
 
 
-def build_city(scene: Scene, origin: Point2) -> Builder:
-    """Ground, water, parks and extruded buildings with baked moonlight."""
-    b = Builder()
-    xmin, ymin, xmax, ymax = scene.bounds
-    pad = 400.0
-    g = [
-        (xmin - pad, ymin - pad),
-        (xmax + pad, ymin - pad),
-        (xmax + pad, ymax + pad),
-        (xmin - pad, ymax + pad),
-    ]
-    b.polygon(g, -0.05, GROUND, origin)
-    step = 100.0
-    x = math.floor((xmin - pad) / step) * step
-    while x <= xmax + pad:
-        a = to_ursina(x, ymin - pad, 0.0, origin)
-        c = to_ursina(x, ymax + pad, 0.0, origin)
-        b.quad(
-            (a[0] - 0.25, 0.0, a[2]),
-            (c[0] - 0.25, 0.0, c[2]),
-            (c[0] + 0.25, 0.0, c[2]),
-            (a[0] + 0.25, 0.0, a[2]),
-            GRID,
-            0.35,
-        )
-        x += step
-    y = math.floor((ymin - pad) / step) * step
-    while y <= ymax + pad:
-        a = to_ursina(xmin - pad, y, 0.0, origin)
-        c = to_ursina(xmax + pad, y, 0.0, origin)
-        b.quad(
-            (a[0], 0.0, a[2] - 0.25),
-            (c[0], 0.0, c[2] - 0.25),
-            (c[0], 0.0, c[2] + 0.25),
-            (a[0], 0.0, a[2] + 0.25),
-            GRID,
-            0.35,
-        )
-        y += step
+def build_city(scene: Scene, origin: Point2) -> tuple[Builder, Builder]:
+    """Ground, water, parks and extruded buildings with baked moonlight; and lit windows."""
+    b, lights = Builder(), Builder()
+    far = 7000.0  # ground out to the horizon; the haze hides its edge
+    b.polygon([(-far, -far), (far, -far), (far, far), (-far, far)], -0.05, GROUND, (0.0, 0.0))
     for area in scene.areas:
         if area.kind == "water":
             b.polygon(area.outline, 0.02, WATER, origin)
+            poly = [(x, y, 0.0) for x, y in ccw(area.outline)]
+            ring_ = [*poly, poly[0]]
+            left, right = strip(ring_, 0.6, -0.6)
+            lights.band(_u(left, origin, 0.05), _u(right, origin, 0.05), WATER_EDGE, 0.35)
         elif area.kind == "park":
             b.polygon(area.outline, 0.01, PARK, origin)
     rng = random.Random(7)
@@ -254,21 +287,48 @@ def build_city(scene: Scene, origin: Point2) -> Builder:
             continue
         h = area.height_m
         tint = rng.uniform(0.85, 1.15)
+        floors = max(1, int(h // FLOOR_M))
         poly = ccw(area.outline)
         for (x1, y1), (x2, y2) in zip(poly, [*poly[1:], poly[0]], strict=True):
             nx, ny = (y2 - y1), -(x2 - x1)  # outward normal of a CCW outline
             n = math.hypot(nx, ny) or 1.0
             shade = 0.55 + 0.45 * max(0.0, (nx * lx + ny * ly) / n)
-            rgb = [c * shade * tint for c in WALL]
-            b.quad(
+            low = [c * shade * tint * 0.45 for c in WALL]  # darker at street level
+            high = [c * shade * tint * 1.5 for c in WALL]
+            b.shaded(
                 to_ursina(x1, y1, 0, origin),
                 to_ursina(x1, y1, h, origin),
                 to_ursina(x2, y2, h, origin),
                 to_ursina(x2, y2, 0, origin),
-                rgb,
+                low,
+                high,
             )
+            if n < 6.0:
+                continue
+            ox, oy = nx / n * 0.06, ny / n * 0.06  # just proud of the wall
+            for floor in range(floors):
+                if rng.random() > 0.22:
+                    continue
+                z0 = floor * FLOOR_M + 1.1
+                rgb = WINDOW_WARM if rng.random() < 0.7 else WINDOW_COOL
+                k = rng.uniform(0.25, 0.55)
+                count = max(1, int((n - 2.0) / 3.0))  # a window every 3 m, 1.5 m wide
+                for w in range(count):
+                    if rng.random() < 0.3:
+                        continue  # some rooms are dark
+                    f0 = (1.0 + w * 3.0 + 0.75) / n
+                    f1 = f0 + 1.5 / n
+                    pa = (x1 + (x2 - x1) * f0 + ox, y1 + (y2 - y1) * f0 + oy)
+                    pb = (x1 + (x2 - x1) * f1 + ox, y1 + (y2 - y1) * f1 + oy)
+                    lights.quad(
+                        to_ursina(*pa, z0, origin),
+                        to_ursina(*pa, z0 + 1.2, origin),
+                        to_ursina(*pb, z0 + 1.2, origin),
+                        to_ursina(*pb, z0, origin),
+                        [c * k for c in rgb],
+                    )
         b.polygon(area.outline, h, [c * tint for c in ROOF], origin)
-    return b
+    return b, lights
 
 
 def build_decor(scene: Scene, origin: Point2) -> tuple[Builder, Builder]:
@@ -354,3 +414,26 @@ def car_mesh(length: float = 4.5, width: float = 1.9) -> Mesh:
     if len(b.meshes) != 1:
         raise AssertionError("car mesh should fit one chunk")
     return b.meshes[0]
+
+
+def beam(height: float = 1.0, width: float = 1.0, segments: int = 6) -> Mesh:
+    """A vertical light shaft (crossed quads), bright at the base and fading upwards.
+    White, so it can be tinted; draw it additively."""
+    verts: list[Vec3] = []
+    cols: list[color.Color] = []
+    tris: list[int] = []
+    for k in range(2):
+        dx, dz = (width / 2, 0.0) if k == 0 else (0.0, width / 2)
+        for s in range(segments):
+            y0, y1 = height * s / segments, height * (s + 1) / segments
+            a0, a1 = (1 - s / segments) ** 2, (1 - (s + 1) / segments) ** 2
+            i = len(verts)
+            verts += [Vec3(-dx, y0, -dz), Vec3(-dx, y1, -dz), Vec3(dx, y1, dz), Vec3(dx, y0, dz)]
+            cols += [
+                color.rgba(1, 1, 1, a0),
+                color.rgba(1, 1, 1, a1),
+                color.rgba(1, 1, 1, a1),
+                color.rgba(1, 1, 1, a0),
+            ]
+            tris += [i, i + 1, i + 2, i, i + 2, i + 3]
+    return Mesh(vertices=verts, triangles=tris, colors=cols)

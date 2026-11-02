@@ -38,10 +38,14 @@ python -m v2v.sim.world3d --corridor hebbal       # once: buildings, water, park
 python dashboard/sim3d/app.py                    # --scenario noisy-low-s0 --config baseline_a
 ```
 
-Right-drag rotate, scroll zoom, WASD/middle-drag pan, click a vehicle or the hazard.
-Space play/pause, K skip to the event, N step, R reset, F follow, G ground truth,
-1-7 speed, [ ] scenario, Tab panels, F11 full screen. Report text stays fixture text
-(labelled in the HUD) until P1's real test split exists.
+It opens as a scroll-driven tour: the mouse wheel (or the arrow keys) glides the camera
+through six chapters (the corridor, the flyovers, the hazard, the geocast region) and the
+camera flies to the geocast view when a warning goes out. Drag to explore freely; T or
+"Back to tour" returns. Click a vehicle or the hazard for its card; the controls fold
+into the dock at the bottom left (C). Space play/pause, K skip to the event, N step,
+R reset, F follow, G ground truth, 1-7 speed, [ ] scenario, Tab hide the interface,
+F11 full screen, `--no-bloom` on slower GPUs. Report text stays fixture text (labelled
+in the card) until P1's real test split exists.
 
 Configs: `baseline_a`, `baseline_b`, `proposed`, `ablation_direction`,
 `ablation_confidence`. Right now the pipeline runs on stubs and a toy two-way road
