@@ -206,3 +206,10 @@ def test_datasheet_reports_measured_counts_only() -> None:
     assert "kappa_hazard: 0.5" in text
     assert "| fixture | 1 |" in text
     assert "Reddit and YouTube text through" not in text
+
+
+def test_datasheet_separates_fixed_option_text() -> None:
+    fixed = _gold("survey:options-1", HazardType.ACCIDENT, "survey")
+    text = datasheet.render([fixed, _gold("survey:2", HazardType.ACCIDENT, "survey")], {})
+    assert "1 survey records are fixed-option text" in text
+    assert "fixed-option" not in datasheet.render([_gold("1", HazardType.ACCIDENT)], {})

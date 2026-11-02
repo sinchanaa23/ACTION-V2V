@@ -45,6 +45,20 @@ def test_survey_keeps_only_consenting_adults(tmp_path: Path) -> None:
     assert "[PHONE]" in records[0].text
 
 
+def test_fixed_options_are_marked_in_report_ids(tmp_path: Path) -> None:
+    row = {
+        survey.CONSENT_COLUMN: survey.CONSENT_YES,
+        survey.ADULT_COLUMN: survey.ADULT_YES,
+        "Hazard report 1": "one",
+    }
+    path = tmp_path / "r.csv"
+    _write_survey(path, [row])
+    marked = list(survey.read_responses(path, fixed_options=True))
+    plain = list(survey.read_responses(path))
+    assert marked[0].report_id.startswith(survey.FIXED_OPTION_REPORT_PREFIX)
+    assert not plain[0].report_id.startswith(survey.FIXED_OPTION_REPORT_PREFIX)
+
+
 def test_survey_rejects_renamed_columns(tmp_path: Path) -> None:
     path = tmp_path / "r.csv"
     path.write_text("Consent,Other\nI agree,x\n", encoding="utf-8")
