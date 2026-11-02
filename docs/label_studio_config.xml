@@ -1,0 +1,22 @@
+<View>
+  <Header value="Read the whole report first. Label what it says, not what you guess happened."/>
+  <Labels name="span" toName="text">
+    <Label value="LOCATION" background="#0f766e"/>
+  </Labels>
+  <Text name="text" value="$text" granularity="word"/>
+  <Header value="Hazard class (one)"/>
+  <Choices name="hazard" toName="text" choice="single-radio" required="true">
+    <Choice value="accident"/>
+    <Choice value="road_obstruction"/>
+    <Choice value="slippery_road"/>
+    <Choice value="stopped_vehicle"/>
+    <Choice value="speeding_concern"/>
+    <Choice value="non_actionable"/>
+    <Choice value="ambiguous"/>
+  </Choices>
+  <Header value="Flags (any that apply)"/>
+  <Choices name="flags" toName="text" choice="multiple">
+    <Choice value="negated"/>
+    <Choice value="hedged"/>
+  </Choices>
+</View>
