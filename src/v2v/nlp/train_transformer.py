@@ -206,7 +206,7 @@ def fine_tune(
             optimiser.zero_grad()
             loss.backward()
             optimiser.step()
-            total += float(loss) * len(batch_records)
+            total += loss.item() * len(batch_records)
         scores = evaluate(clf, val_set)
         log(
             f"epoch {epoch}: train loss {total / len(order):.4f}, "
