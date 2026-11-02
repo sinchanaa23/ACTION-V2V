@@ -1,6 +1,10 @@
 """Location, negation and hedging extraction. Owner: P2 (P2-02, P2-03, P2-06)."""
 
+import os
 import re
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
 
 # --- Rule-based location spans (P2-03) --------------------------------------
 #
@@ -125,12 +129,30 @@ def find_locations(normalised_text: str) -> list[str]:
     return [normalised_text[tokens[a][1] : tokens[b][2]] for a, b in sorted(set(kept))]
 
 
+SPAN_TAGGER_ENV_VAR = "V2V_SPAN_TAGGER"
+"""Path to a trained span tagger (P2-06). When set and the file exists,
+extract_location uses it instead of the rules; choose on validation."""
+
+
+@lru_cache(maxsize=2)
+def _span_tagger(path: str) -> Any:
+    from v2v.nlp.span_tagger import SpanTagger
+
+    return SpanTagger.load(Path(path)) if Path(path).exists() else None
+
+
 def extract_location(normalised_text: str) -> str | None:
     """Return the location phrase stated in the report, or None.
 
     The longest span wins (it names the place most precisely); ties go to the
-    first one. Never guesses: no span in the text means None.
+    first one. Never guesses: no span in the text means None. Uses the
+    trained span tagger instead of the rules when V2V_SPAN_TAGGER points to one.
     """
+    tagger_path = os.environ.get(SPAN_TAGGER_ENV_VAR)
+    tagger = _span_tagger(tagger_path) if tagger_path else None
+    if tagger is not None:
+        found: str | None = tagger.extract_location(normalised_text)
+        return found
     spans = find_locations(normalised_text)
     if not spans:
         return None
