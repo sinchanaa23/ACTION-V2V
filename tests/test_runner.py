@@ -70,7 +70,9 @@ def test_toy_run_scores_every_config_and_threshold() -> None:
             assert row["messages_sent"] and row["warning_text"]
     proposed = {(r["theta_i"], r["theta_e"]): r for r in by_config["proposed"]}
     assert proposed[(0.5, 0.5)]["status"] == "unverified"  # one report: evidence 0.35
-    assert proposed[(0.9, 0.9)]["status"] == "unverified"  # keyword fallback p=1.0
+    strict = proposed[(0.9, 0.9)]  # theta_i decides: P2's confidence (location penalty)
+    expected = "unverified" if strict["interp_conf"] >= 0.9 else "suppressed"  # type: ignore[operator]
+    assert strict["status"] == expected
     broadcast = by_config["baseline_a"][0]
     directional = by_config["proposed"][0]
     assert broadcast["messages_sent"] >= directional["messages_sent"]  # type: ignore[operator]

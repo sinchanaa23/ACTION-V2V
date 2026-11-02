@@ -232,7 +232,12 @@ class Evaluator:
         ) or fallback_location(reporter)
         flags = self.world.sensor_flags(location, SENSOR_RADIUS_M)
         view = self.trackers[processing].observe(
-            interp, location, flags, reporter_id=report.reporter_id, t_s=self.world.time_s
+            interp,
+            location,
+            flags,
+            reporter_id=report.reporter_id,
+            t_s=self.world.time_s,
+            interp_conf=pipeline.interp_confidence(interp, _PROCESSING_CONFIG[processing]),
         )
         return _Reading(interp, location, flags, view)
 
@@ -342,6 +347,7 @@ class Evaluator:
             config.distribution,
             msg_id=f"{self.run.scenario_id}-{event.slot_id}-{'-'.join(map(str, key))}",
             t_sent=self.world.time_s,
+            location_text=reading.interp.location_text,
         )
         outcome = self.delivery_model.deliver(
             warning, self.world, self.run.hazard, sender_id=event.reporter_id, seed=self.run.seed

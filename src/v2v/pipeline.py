@@ -41,6 +41,15 @@ def interpret(report: DriverReport, config: ExperimentConfig) -> HazardInterpret
     return classifier.interpret(report.report_id, text)
 
 
+def interp_confidence(interp: HazardInterpretation, config: ExperimentConfig) -> float:
+    """Confidence in the reading for theta_i. NLP readings use P2's
+    interpretation_confidence (lower for hedged or location-less reports);
+    the keyword baseline has only its fixed p_class."""
+    if config.hazard_processing == "nlp":
+        return classifier.interpretation_confidence(interp)
+    return interp.p_class
+
+
 def assess(
     interp: HazardInterpretation,
     location: ResolvedLocation,
@@ -56,6 +65,7 @@ def assess(
             world.sensor_flags(location, SENSOR_RADIUS_M),
             reporter_id=reporter_id,
             t_s=world.time_s,
+            interp_conf=interp_confidence(interp, config),
         )
     # Baselines: the class threshold alone decides; no evidence stage.
     actionable = policy.is_actionable(interp) and interp.p_class >= config.theta_i
@@ -106,8 +116,11 @@ def process_report(
             config.distribution,
             msg_id=f"{report.report_id}-m0",
             t_sent=world.time_s,
+            location_text=interp.location_text,
         )
-        deliveries = tuple(delivery.deliver(warning, world, scenario.hazard_location))
+        deliveries = tuple(
+            delivery.deliver(warning, world, scenario.hazard_location, report.reporter_id)
+        )
 
     return RunResult(
         config_name=config.name,
