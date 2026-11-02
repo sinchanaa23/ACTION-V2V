@@ -35,7 +35,7 @@ STRONG_PLACE_WORDS: frozenset[str] = frozenset(
 WEAK_PLACE_WORDS: frozenset[str] = frozenset(
     {
         "road", "rd", "main", "cross", "highway", "expressway", "nagar", "layout", "gate",
-        "market", "bazaar", "park", "office", "campus", "colony", "street", "marg",
+        "market", "bazaar", "park", "campus", "colony", "street", "marg",
     }
 )  # fmt: skip
 
@@ -71,8 +71,26 @@ def _token_spans(text: str) -> list[tuple[str, int, int]]:
     return [(m.group(0), m.start(), m.end()) for m in _TOKEN.finditer(text)]
 
 
+# Words describing the hazard or the road's state, never part of a place name
+# ("slippery road" is a hazard, not a road called Slippery).
+_ROAD_STATE_WORDS: frozenset[str] = frozenset(
+    {
+        "slippery", "wet", "oily", "muddy", "flooded", "waterlogged", "blocked", "jammed",
+        "broken", "damaged", "bad", "narrow", "dark", "busy", "empty", "closed", "same",
+        "kharab", "toota", "tooti", "gila", "geela",
+        # movement verbs: "reached home", "going to market"
+        "reached", "reach", "going", "went", "came", "coming", "leaving", "crossed", "passing",
+    }
+)  # fmt: skip
+
+
 def _is_name(token: str) -> bool:
-    return token not in _NOT_A_NAME and token not in STRONG_PLACE_WORDS
+    return (
+        token not in _NOT_A_NAME
+        and token not in STRONG_PLACE_WORDS
+        and token not in _ROAD_STATE_WORDS
+        and token not in HAZARD_WORDS
+    )
 
 
 def _place_word_spans(tokens: list[tuple[str, int, int]]) -> list[tuple[int, int, bool]]:
