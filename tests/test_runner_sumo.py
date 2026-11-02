@@ -35,7 +35,7 @@ def test_smoke_first_60_simulated_seconds(noisy_spec: Path) -> None:
     logs: list[str] = []
     rows = runner.run_sumo_scenario(
         noisy_spec,
-        runner.ReportPool(runner.DEMO_POOL),
+        runner.ReportPool(runner.DEMO_POOL, allow_reuse=True),
         [PROPOSED],
         policy.threshold_grid((0.6,), (0.75,)),
         {"git_sha": "test"},
@@ -53,7 +53,7 @@ def test_noisy_scenario_scores_every_report(noisy_spec: Path) -> None:
 
     rows = runner.run_sumo_scenario(
         noisy_spec,
-        runner.ReportPool(runner.DEMO_POOL),
+        runner.ReportPool(runner.DEMO_POOL, allow_reuse=True),
         list(CONFIGS.values()),
         policy.threshold_grid((0.6,), (0.75,)),
         {"git_sha": "test"},

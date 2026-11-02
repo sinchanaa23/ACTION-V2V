@@ -11,7 +11,7 @@ from v2v.experiments import CONFIGS
 
 @pytest.fixture(scope="module")
 def toy_rows() -> list[dict[str, object]]:
-    pool = runner.ReportPool(runner.DEMO_POOL)
+    pool = runner.ReportPool(runner.DEMO_POOL, allow_reuse=True)
     grid = policy.threshold_grid((0.6, 0.9), (0.75, 0.9))
     rows: list[dict[str, object]] = []
     for seed in (0, 1, 2):

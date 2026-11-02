@@ -92,10 +92,13 @@ exercise code paths; results made with them are labelled and never reported."""
 class ReportPool:
     """Real records to fill scenario slots, drawn reproducibly."""
 
-    def __init__(self, records: Sequence[GoldRecord]) -> None:
+    def __init__(self, records: Sequence[GoldRecord], allow_reuse: bool = False) -> None:
         if not records:
             raise ValueError("empty report pool")
         self.records = tuple(records)
+        self.allow_reuse = allow_reuse
+        """Fixture pools only: one text may fill several slots of a scenario.
+        Real pools never reuse, so each slot is a different real report."""
 
     @classmethod
     def load(cls, path: Path) -> "ReportPool":
@@ -119,7 +122,11 @@ class ReportPool:
     ) -> GoldRecord | None:
         """Seeded choice, avoiding records already used in this scenario."""
         options = sorted(
-            (r for r in self.candidates(needs, hazard_class) if r.report_id not in used),
+            (
+                r
+                for r in self.candidates(needs, hazard_class)
+                if self.allow_reuse or r.report_id not in used
+            ),
             key=lambda r: r.report_id,
         )
         if not options:
@@ -533,7 +540,7 @@ def main(argv: list[str] | None = None) -> None:
     grid = policy.threshold_grid(args.theta_i, args.theta_e)
     provenance = {"git_sha": git_sha(), "model_hash": model_hash()}
     fixtures = args.toy or args.fixtures
-    pool = ReportPool(DEMO_POOL) if fixtures else ReportPool.load(args.reports)
+    pool = ReportPool(DEMO_POOL, allow_reuse=True) if fixtures else ReportPool.load(args.reports)
     rows: list[dict[str, Any]] = []
     if args.toy:
         for seed in args.seeds:

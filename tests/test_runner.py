@@ -48,6 +48,11 @@ def test_pool_matches_slot_needs() -> None:
         runner.ReportPool([])
 
 
+def test_fixture_pool_may_reuse() -> None:
+    pool = runner.ReportPool([_rec("a", HazardType.ACCIDENT)], allow_reuse=True)
+    assert pool.pick("hazard", HazardType.ACCIDENT, "k", {"a"}) is not None
+
+
 def test_pick_is_reproducible() -> None:
     pool = runner.ReportPool([_rec(str(i), HazardType.ACCIDENT) for i in range(20)])
     first = pool.pick("hazard", HazardType.ACCIDENT, "s1-slot_0-0", set())
@@ -55,7 +60,7 @@ def test_pick_is_reproducible() -> None:
 
 
 def test_toy_run_scores_every_config_and_threshold() -> None:
-    pool = runner.ReportPool(runner.DEMO_POOL)
+    pool = runner.ReportPool(runner.DEMO_POOL, allow_reuse=True)
     rows = runner.run_toy(0, pool, list(CONFIGS.values()), GRID, {"git_sha": "x"})
     by_config: dict[str, list[dict[str, object]]] = {}
     for row in rows:
