@@ -352,7 +352,10 @@ class Evaluator:
             hazard,
             recipients,
             config.distribution,
-            msg_id=f"{self.run.scenario_id}-{event.slot_id}-{'-'.join(map(str, key))}",
+            # One message id per report, shared by every config: the delivery
+            # model seeds its channel draws from it, so configs that address
+            # the same vehicles get the same luck (common random numbers).
+            msg_id=f"{self.run.scenario_id}-{event.slot_id}",
             t_sent=self.world.time_s,
             location_text=reading.interp.location_text,
         )

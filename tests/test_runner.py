@@ -83,6 +83,17 @@ def test_toy_run_scores_every_config_and_threshold() -> None:
     assert broadcast["messages_sent"] >= directional["messages_sent"]  # type: ignore[operator]
 
 
+def test_same_recipients_get_same_delivery() -> None:
+    pool = runner.ReportPool(runner.DEMO_POOL, allow_reuse=True)
+    rows = runner.run_toy(0, pool, list(CONFIGS.values()), GRID, {})
+    first = {r["config"]: r for r in rows}
+    # proposed and ablation_confidence both use directional geocast here.
+    a, b = first["proposed"], first["ablation_confidence"]
+    if a["messages_sent"] == b["messages_sent"]:
+        assert a["relevant_delivery_rate"] == b["relevant_delivery_rate"]
+        assert a["mean_latency_ms"] == b["mean_latency_ms"]
+
+
 def test_cli_toy_writes_rows_and_meta(tmp_path: Path) -> None:
     runner.main(["--toy", "--seeds", "0", "1", "--out", str(tmp_path), "--name", "t"])
     lines = (tmp_path / "t.jsonl").read_text(encoding="utf-8").splitlines()
