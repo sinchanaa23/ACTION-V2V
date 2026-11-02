@@ -68,10 +68,12 @@ Commit `src/v2v/nlp/keywords.json`. Tune nothing after looking at test scores.
 
 ## 6. Crash dataset
 
-Check the column names in the dataset's data dictionary first.
+The raw article CSVs have the columns `Title`, `Date` and `content`, so the text
+column is `content`. They have no crash-type column, so `--category-column` is
+left out. Combine the 2022 and 2023 files into one CSV first.
 
 ```bash
-python -m v2v.data.news_crash crashes.csv --text-column ARTICLE_TEXT --category-column CRASH_TYPE
+python -m v2v.data.news_crash crashes.csv --text-column content
 ```
 
 Send `data/raw/landmark_phrases.json` to P4 for the landmark list.
