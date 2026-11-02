@@ -47,9 +47,16 @@ def assess(
     world: World,
     config: ExperimentConfig,
     tracker: HazardTracker,
+    reporter_id: str | None = None,
 ) -> AssessedHazard:
     if config.confidence:
-        return tracker.ingest(interp, location, world.sensor_flags(location, SENSOR_RADIUS_M))
+        return tracker.ingest(
+            interp,
+            location,
+            world.sensor_flags(location, SENSOR_RADIUS_M),
+            reporter_id=reporter_id,
+            t_s=world.time_s,
+        )
     # Baselines: the class threshold alone decides; no evidence stage.
     actionable = policy.is_actionable(interp) and interp.p_class >= config.theta_i
     return AssessedHazard(
@@ -79,7 +86,7 @@ def process_report(
     location = world.resolve_location(
         interp.location_text, reporter.vehicle_id
     ) or fallback.fallback_location(reporter)
-    assessed = assess(interp, location, world, config, tracker)
+    assessed = assess(interp, location, world, config, tracker, report.reporter_id)
 
     vehicles = world.vehicles()
     relevant = tuple(
