@@ -46,3 +46,10 @@ def test_span_is_copied_verbatim() -> None:
 
 def test_longest_span_wins() -> None:
     assert extract_location("signal ke baad, hebbal flyover pe jam") == "hebbal flyover"
+
+
+def test_hazard_words_are_not_place_names() -> None:
+    assert extract_location("oil spill, slippery road near petrol pump") == "petrol pump"
+    assert extract_location("accident road pe") is None
+    assert extract_location("reached office on time") is None
+    assert extract_location("going to brigade road market") == "brigade road market"
