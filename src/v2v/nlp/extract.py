@@ -219,15 +219,23 @@ _HI_NEGATORS: frozenset[str] = frozenset({"nahi", "nahin", "nahee", "nai", "nhi"
 # out before negation is checked; several are hedges instead ("pata nahi").
 _PSEUDO_NEGATIONS = re.compile(
     r"\b(?:no doubt|not sure|not only|no idea|no entry|no parking|no u ?turn|"
-    r"pata nahi|pata nahin|pata nhi|nahi to|nahin to|warna)\b"
+    r"(?:was|is|were|are)n'?t sure|not certain|"
+    r"(?:could|can)(?: not|n'?t) (?:tell|say|see|work out|make out)|"
+    r"pata nahi|pata nahin|pata nhi|samajh nahi|dikha nahi|nahi to|nahin to|warna)\b"
 )
 
 # The hazard has gone. Reported as negated so no new alert is raised, with
 # ``kind="cleared"`` so P3 can treat it as a contradiction of an earlier report.
 _CLEARED = re.compile(
-    r"\b(?:cleared|clear now|road is clear|road clear|all clear|been removed|removed|"
-    r"cleaned up|hata diya|hata diye|hat gaya|hat gayi|saaf ho gaya|saaf ho gayi|"
-    r"clear ho gaya|clear ho gayi|khul gaya|khul gayi|reopened|open now)\b"
+    # Not after "not"/"n't": "road is not clear now" means it is still blocked.
+    r"\b(?<!not )(?<!n't )(?:cleared|clear now|road is clear|road clear|all clear|"
+    r"been removed|removed|cleaned up|hata diya|hata diye|hat gaya|hat gayi|"
+    r"saaf ho gaya|saaf ho gayi|"
+    r"clear ho gaya|clear ho gayi|khul gaya|khul gayi|reopened|open now|"
+    r"(?:has|had|have|been) (?:moved|gone|shifted|towed|fixed|repaired|drained)|"
+    r"moved away|towed away|drained away|swept (?:aside|away)|no longer there|"
+    r"working again|back to normal|normal now|chala gaya|chali gayi|theek ho gaya|"
+    r"theek ho gayi|nikal gaya|nikal gayi)\b"
 )
 
 _HEDGES = re.compile(
@@ -235,7 +243,10 @@ _HEDGES = re.compile(
     r"ho sakta hai|ho sakti hai|pata nahi|pata nahin|pata nhi|suna hai|suna h|"
     r"sunne mein aaya|kisi ne bataya|keh rahe the|maybe|may be|perhaps|possibly|"
     r"probably|might|i think|i guess|not sure|seems|seem to|looks like|apparently|"
-    r"reportedly|i heard|heard that|someone said|people are saying|could be|rumou?r)\b"
+    r"reportedly|i heard|heard that|someone said|people are saying|could be|rumou?r|"
+    r"unsure|unclear|(?:was|is|were|are)n'?t sure|not certain|"
+    r"(?:could|can)(?: not|n'?t) (?:tell|say|see|work out|make out)|hard to (?:tell|say)|"
+    r"seemed|looked like|samajh nahi aaya|samajh nahi aa raha|dikha nahi|confirm nahi)\b"
 )
 
 

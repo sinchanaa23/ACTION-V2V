@@ -66,3 +66,47 @@ def test_hedges(text: str, cue: str) -> None:
 
 def test_plain_report_not_hedged() -> None:
     assert not extract.detect_hedging("bhai aage accident hua hai bridge ke paas")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "the stalled truck has moved now",
+        "water drained away, route is fine",
+        "the fallen tree was towed away",
+        "signal is working again",
+        "gaadi chali gayi, road theek ho gaya",
+    ],
+)
+def test_more_cleared_phrasings(text: str) -> None:
+    result = extract.find_negation(text)
+    assert result is not None and result[0] == "cleared"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "i couldn't tell what it was, maybe debris",
+        "wasn't sure if it was an accident",
+        "hard to tell from far, something on the road",
+        "kuch pada hai, samajh nahi aaya kya hai",
+        "it was unclear whether the lane was blocked",
+    ],
+)
+def test_more_hedges(text: str) -> None:
+    assert extract.detect_hedging(text)
+
+
+def test_uncertainty_phrases_are_not_negation() -> None:
+    # "wasn't sure ... accident" is doubt about the hazard, not a denial of it.
+    assert not extract.detect_negation("wasn't sure if it was an accident")
+    assert not extract.detect_negation("couldn't tell if the accident was serious")
+
+
+@pytest.mark.parametrize(
+    "text", ["road is not clear now", "lane isn't cleared yet, truck still there"]
+)
+def test_not_clear_is_not_cleared_or_hedged(text: str) -> None:
+    result = extract.find_negation(text)
+    assert result is None or result[0] != "cleared"
+    assert not extract.detect_hedging(text)
