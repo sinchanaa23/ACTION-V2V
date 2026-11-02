@@ -11,6 +11,10 @@ Claude must not run the steps that touch `data/splits/test/`, per `CLAUDE.md`.
 python -m v2v.data.survey data/raw/responses.csv --out data/raw/survey.jsonl
 ```
 
+If people picked from team-written sentences rather than writing their own, add
+`--fixed-options` and use a separate `--out` file. Those records stay marked by
+their IDs, and the datasheet reports them separately.
+
 The survey is the only required source. The Reddit and YouTube collectors are
 optional and need API credentials. Never scrape around them.
 
