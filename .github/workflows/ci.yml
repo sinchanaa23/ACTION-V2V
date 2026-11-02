@@ -1,6 +1,7 @@
 name: ci
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
   pull_request:
@@ -31,3 +32,26 @@ jobs:
         run: python scripts/check_test_split.py origin/${{ github.base_ref }}
       - name: Pipeline smoke run
         run: python -m v2v.pipeline --config proposed --seed 0
+
+  # P3-06: config P on the real Hebbal network for 60 simulated seconds.
+  # Runs on main and on demand only: it downloads the OSM corridor (cached by
+  # snapshot date), so a slow Overpass server never blocks a PR.
+  sim-smoke:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[dev,sim]"
+      - uses: actions/cache@v4
+        with:
+          path: sim_out/networks
+          key: osm-${{ hashFiles('src/v2v/sim/osm_network.py') }}
+      - name: Real network and one scenario
+        run: python -m v2v.sim.scenarios --corridor hebbal --conditions noisy --densities low --seeds 0 --no-validate
+      - name: Config P, first 60 simulated seconds
+        run: >
+          python -m v2v.eval.runner sim_out/scenarios/hebbal/noisy-low-s0 --fixtures
+          --configs proposed --max-time 60 --out sim_out/results --name smoke
