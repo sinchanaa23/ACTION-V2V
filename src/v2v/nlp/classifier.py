@@ -25,7 +25,8 @@ from v2v.nlp import calibrate, extract, keyword_baseline, preprocess
 
 DEFAULT_MODEL_PATH = Path("models/tfidf_lr.pkl")
 MODEL_ENV_VAR = "V2V_CLASSIFIER"
-"""Set to a model path to override DEFAULT_MODEL_PATH."""
+"""Set to a model path to override DEFAULT_MODEL_PATH: a Baseline B .pkl, or
+a transformer directory saved by train_transformer."""
 
 LABEL_FIELD = "hazard"
 """Gold label key in the annotated JSONL (a HazardType value)."""
@@ -151,7 +152,13 @@ def model_path() -> Path:
 
 
 @lru_cache(maxsize=4)
-def _load_cached(path: Path) -> TfidfHazardClassifier | None:
+def _load_cached(path: Path) -> Any:
+    """Baseline B from a .pkl file, or a fine-tuned transformer (P2-05) from a
+    directory holding v2v_meta.json; None when nothing is trained yet."""
+    if path.is_dir():
+        from v2v.nlp.train_transformer import META_FILE, TransformerHazardClassifier
+
+        return TransformerHazardClassifier.load(path) if (path / META_FILE).exists() else None
     return TfidfHazardClassifier.load(path) if path.exists() else None
 
 
@@ -163,7 +170,7 @@ def interpret(report_id: str, normalised_text: str) -> HazardInterpretation:
         hazard, p_class, used = base.hazard, base.p_class, "keyword_fallback"
     else:
         hazard, p_class = model.predict([normalised_text])[0]
-        used = model.name
+        used = str(model.name)
     return HazardInterpretation(
         report_id=report_id,
         hazard=hazard,
