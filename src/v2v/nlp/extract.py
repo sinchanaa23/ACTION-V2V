@@ -78,6 +78,8 @@ _ROAD_STATE_WORDS: frozenset[str] = frozenset(
         "slippery", "wet", "oily", "muddy", "flooded", "waterlogged", "blocked", "jammed",
         "broken", "damaged", "bad", "narrow", "dark", "busy", "empty", "closed", "same",
         "kharab", "toota", "tooti", "gila", "geela",
+        # hedges and fillers: "shayad flyover ke paas"
+        "shayad", "shaayad", "maybe", "probably", "lagta", "dhyan", "please", "pls", "jaldi",
         # movement verbs: "reached home", "going to market"
         "reached", "reach", "going", "went", "came", "coming", "leaving", "crossed", "passing",
     }
@@ -114,9 +116,22 @@ def find_locations(normalised_text: str) -> list[str]:
     tokens = _token_spans(normalised_text)
     spans: list[tuple[int, int]] = []  # token index ranges, inclusive
 
-    for first, last, strong in _place_word_spans(tokens):
+    places = _place_word_spans(tokens)
+    in_place = {i for first, last, strong in places if strong for i in range(first, last + 1)}
+
+    def joined(i: int) -> bool:
+        """Token i-1 and token i are separated by spaces only (no comma etc.)."""
+        return not normalised_text[tokens[i - 1][2] : tokens[i][1]].strip()
+
+    for first, last, strong in places:
         start = first
-        while start > 0 and first - start < MAX_MODIFIERS and _is_name(tokens[start - 1][0]):
+        while (
+            start > 0
+            and first - start < MAX_MODIFIERS
+            and joined(start)
+            and start - 1 not in in_place
+            and _is_name(tokens[start - 1][0])
+        ):
             start -= 1
         # Weak place words ("road", "cross") need a name: "bellary road".
         if strong or start < first:
