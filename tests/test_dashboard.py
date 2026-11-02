@@ -108,35 +108,97 @@ needs_streamlit = pytest.mark.skipif(
 APP = str(Path(__file__).resolve().parents[1] / "dashboard" / "app.py")
 
 
+DASHBOARD = Path(APP).parent
+
+
+@pytest.fixture
+def ui(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the dashboard's sibling ui_* modules importable."""
+    monkeypatch.syspath_prepend(str(DASHBOARD))
+
+
 @needs_streamlit
-def test_app_renders_a_trace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.usefixtures("ui")
+def test_geometry_helpers() -> None:
+    from ui_map import distance_m, ring, ticks
+    from ui_pages import cardinal
+
+    lons, lats = ring(77.59, 13.04, 300.0)
+    assert (lons[0], lats[0]) == (lons[-1], lats[-1])  # closed outline
+    assert all(
+        abs(distance_m(77.59, 13.04, x, y) - 300.0) < 1.0 for x, y in zip(lons, lats, strict=True)
+    )
+    north = _snap("n", False).model_copy(update={"heading_deg": 0.0})
+    tick_lons, tick_lats = ticks([north])
+    assert tick_lats[1] > tick_lats[0] and tick_lons[1] == pytest.approx(tick_lons[0])
+    assert tick_lons[2] is None  # segments are separated
+    assert [cardinal(h) for h in (0, 44, 90, 200, 315, 359)] == ["N", "NE", "E", "S", "NW", "N"]
+
+
+@needs_streamlit
+@pytest.mark.usefixtures("ui")
+def test_warning_text_comes_from_p2_generator(tmp_path: Path) -> None:
+    from ui_data import View, warning_text
+
+    trace = _trace(tmp_path)
+    known = warning_text(View(trace, trace.frames[0], "directional", "known"))
+    fallback = warning_text(View(trace, trace.frames[0], "directional", "fallback"))
+    assert known is not None and "accident" in known and "approximate" not in known
+    assert fallback is not None and fallback.endswith("Location approximate.")
+    slot = trace.frames[0].slot.model_copy(update={"needs": "non_actionable"})
+    frame = trace.frames[0].model_copy(update={"slot": slot})
+    assert warning_text(View(trace, frame, "directional", "known")) is None
+
+
+def _app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, traces: int = 1):  # type: ignore[no-untyped-def]
     from streamlit.testing.v1 import AppTest
 
-    _trace(tmp_path).save(tmp_path / "traces" / "t.json")
+    for i in range(traces):
+        _trace(tmp_path).save(tmp_path / "traces" / f"t{i}.json")
     monkeypatch.setenv("V2V_TRACES_DIR", str(tmp_path / "traces"))
-    app = AppTest.from_file(APP, default_timeout=60).run()
+    return AppTest.from_file(APP, default_timeout=60)
+
+
+@needs_streamlit
+def test_app_renders_a_trace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    app = _app(tmp_path, monkeypatch).run()
     assert not app.exception
     text = " ".join(m.value for m in app.markdown)
-    assert "pending P2" in text and "event happened" in text
-    app.radio[1].set_value("circular").run()  # switch policy
-    app.radio[2].set_value("fallback").run()  # switch location mode
+    assert "pending P3" in text and "event happened" in text
+    assert "Status: unverified report." in text  # P2's warning text in the trace
+    app.radio(key="policy").set_value("circular").run()
+    app.radio(key="location").set_value("fallback").run()
     assert not app.exception
+    assert "Location approximate." in " ".join(m.value for m in app.markdown)
+
+
+@needs_streamlit
+def test_every_page_renders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    app = _app(tmp_path, monkeypatch).run()
+    for page in ("overview", "live", "network", "reports", "compare", "settings"):
+        app.button(key=f"nav_{page}").click().run()
+        assert not app.exception, page
+        assert app.session_state["page"] == page
+
+
+@needs_streamlit
+def test_preferences_survive_page_switches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    app = _app(tmp_path, monkeypatch).run()
+    app.button(key="nav_settings").click().run()
+    app.radio(key="w_policy_set").set_value("broadcast").run()
+    app.button(key="nav_live").click().run()
+    assert app.radio(key="policy").value == "broadcast"
 
 
 @needs_streamlit
 def test_app_picks_up_traces_recorded_after_start(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from streamlit.testing.v1 import AppTest
-
-    traces = tmp_path / "traces"
-    _trace(tmp_path).save(traces / "a.json")
-    monkeypatch.setenv("V2V_TRACES_DIR", str(traces))
-    app = AppTest.from_file(APP, default_timeout=60).run()
-    assert len(app.selectbox[0].options) == 1
-    _trace(tmp_path).save(traces / "b.json")
+    app = _app(tmp_path, monkeypatch).run()
+    assert len(app.selectbox(key="scenario").options) == 1
+    _trace(tmp_path).save(tmp_path / "traces" / "b.json")
     app.run()
-    assert len(app.selectbox[0].options) == 2
+    assert len(app.selectbox(key="scenario").options) == 2
 
 
 @needs_streamlit

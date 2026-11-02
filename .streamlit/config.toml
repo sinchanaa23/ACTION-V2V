@@ -1,0 +1,11 @@
+# Dashboard theme (dashboard/ui_theme.py styles the rest).
+[theme]
+base = "dark"
+primaryColor = "#c5f23a"
+backgroundColor = "#171717"
+secondaryBackgroundColor = "#202020"
+textColor = "#ececec"
+font = "sans serif"
+
+[client]
+toolbarMode = "minimal"
