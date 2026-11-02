@@ -87,6 +87,18 @@ def test_far_recipient_needs_relays() -> None:
     assert multi.transmissions > single.transmissions == 1
 
 
+def test_relays_trace_each_hop_back_to_the_origin() -> None:
+    chain = {f"v{i}": 150.0 * i for i in range(1, 7)}
+    outcome = DeliveryModel().deliver(_msg(list(chain)), LineWorld(chain), HAZARD)
+    assert set(outcome.relays) == set(outcome.hops)
+    for vid, hop in outcome.hops.items():
+        parent = outcome.relays[vid]
+        if hop == 1:
+            assert parent == "origin"  # no sender given: the hazard point transmits
+        else:
+            assert outcome.hops[parent] == hop - 1  # heard from a vehicle one hop closer
+
+
 def test_only_addressed_vehicles_relay() -> None:
     chain = {f"v{i}": 150.0 * i for i in range(1, 7)}
     world = LineWorld(chain)

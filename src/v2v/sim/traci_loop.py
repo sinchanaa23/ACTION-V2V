@@ -231,6 +231,14 @@ class SumoWorld:
         lon, lat = self._t.simulation.convertGeo(x, y)
         return float(lon), float(lat)
 
+    def blocking_vehicles(self) -> list[VehicleState]:
+        """The scenario's hazard vehicles (left out of ``vehicles()``), for drawing."""
+        return [
+            self._state(vid, tracked)
+            for vid, tracked in self._tracked.items()
+            if tracked.on_road and vid.startswith(HAZARD_PREFIX)
+        ]
+
     def run_until(self, t: float) -> None:
         while self.time_s < t:
             self.step()
