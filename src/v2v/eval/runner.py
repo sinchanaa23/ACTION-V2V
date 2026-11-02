@@ -2,6 +2,7 @@
 
     python -m v2v.eval.runner sim_out/scenarios/hebbal/*-s* --reports data/splits/test/reports.jsonl
     python -m v2v.eval.runner --toy --seeds 0 1 2          # no SUMO, fixture text
+    python -m v2v.eval.runner sim_out/scenarios/hebbal/clean-low-s0 --fixtures --max-time 600
 
 One SUMO run per scenario serves all five configs and the whole threshold
 grid. Warnings do not change how vehicles drive, so at each report that falls
@@ -75,6 +76,10 @@ DEMO_POOL: tuple[GoldRecord, ...] = tuple(
     for i, (text, hazard, negated) in enumerate(
         [
             (pipeline.DEMO_REPORT, HazardType.ACCIDENT, False),
+            ("Bada gaddha hai flyover ke paas, dhyan se", HazardType.OBSTRUCTION, False),
+            ("Oil spill near the signal, road is slippery", HazardType.SLIPPERY, False),
+            ("Truck breakdown ho gaya left lane mein", HazardType.STOPPED, False),
+            ("Bike speeding on the wrong side near the junction", HazardType.SPEEDING, False),
             ("Accident clear ho gaya, road is open now", HazardType.ACCIDENT, True),
             ("Traffic is fine today, reached office on time.", HazardType.NON_ACTIONABLE, False),
         ]
@@ -509,6 +514,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--theta-i", nargs="+", type=float, default=list(policy.DEFAULT_THETA_I))
     parser.add_argument("--theta-e", nargs="+", type=float, default=list(policy.DEFAULT_THETA_E))
     parser.add_argument("--toy", action="store_true", help="toy world with fixture text (no SUMO)")
+    parser.add_argument(
+        "--fixtures", action="store_true", help="smoke test: fixture text instead of --reports"
+    )
     parser.add_argument("--seeds", nargs="+", type=int, default=[0], help="toy run seeds")
     parser.add_argument("--max-time", type=float, help="stop each scenario at this sim time")
     parser.add_argument("--out", type=Path, default=DEFAULT_RESULTS_DIR)
@@ -518,7 +526,8 @@ def main(argv: list[str] | None = None) -> None:
     configs = [CONFIGS[name] for name in args.configs]
     grid = policy.threshold_grid(args.theta_i, args.theta_e)
     provenance = {"git_sha": git_sha(), "model_hash": model_hash()}
-    pool = ReportPool(DEMO_POOL) if args.toy else ReportPool.load(args.reports)
+    fixtures = args.toy or args.fixtures
+    pool = ReportPool(DEMO_POOL) if fixtures else ReportPool.load(args.reports)
     rows: list[dict[str, Any]] = []
     if args.toy:
         for seed in args.seeds:
@@ -537,7 +546,7 @@ def main(argv: list[str] | None = None) -> None:
         **provenance,
         "configs": args.configs,
         "grid": grid,
-        "reports": "fixture (toy run)" if args.toy else str(args.reports),
+        "reports": "fixture (smoke test, not results)" if fixtures else str(args.reports),
         "n_rows": len(rows),
         "python": platform.python_version(),
         "created": time.strftime("%Y-%m-%dT%H:%M:%S%z"),

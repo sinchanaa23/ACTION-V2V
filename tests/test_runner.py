@@ -81,7 +81,7 @@ def test_cli_toy_writes_rows_and_meta(tmp_path: Path) -> None:
     lines = (tmp_path / "t.jsonl").read_text(encoding="utf-8").splitlines()
     meta = json.loads((tmp_path / "t.meta.json").read_text(encoding="utf-8"))
     assert len(lines) == meta["n_rows"] > 0
-    assert meta["reports"] == "fixture (toy run)"
+    assert meta["reports"].startswith("fixture")
     assert {json.loads(line)["seed"] for line in lines} == {0, 1}
 
 
