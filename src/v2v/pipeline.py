@@ -126,9 +126,10 @@ def process_report(
 def run(
     config: ExperimentConfig, report_text: str, seed: int = 0, source: Source = "fixture"
 ) -> RunResult:
-    """Run one report through the toy world.
+    """Run one report through the toy world (CLI demo and CI smoke run).
 
-    STUB(P3-06): switches to SumoWorld on the real network at integration.
+    Experiments on the real network go through ``v2v.eval.runner``, which
+    plays generated scenarios in SumoWorld and scores every config at once.
     """
     scenario = scenarios.toy_scenario(seed)
     world = ToyWorld(scenario, seed=seed)
