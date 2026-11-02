@@ -204,3 +204,5 @@ def test_datasheet_reports_measured_counts_only() -> None:
     assert "| slippery_road | 0 |" in text
     assert "| No location span | 1 |" in text
     assert "kappa_hazard: 0.5" in text
+    assert "| fixture | 1 |" in text
+    assert "Reddit and YouTube text through" not in text

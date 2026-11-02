@@ -25,6 +25,7 @@ def test_survey_keeps_only_consenting_adults(tmp_path: Path) -> None:
         survey.CITY_COLUMN: "Pune",
         "Hazard report 1": "call 9876543210",
         "Warning message": "second",
+        "False alarm report": "third",
     }
     path = tmp_path / "r.csv"
     _write_survey(
@@ -38,7 +39,7 @@ def test_survey_keeps_only_consenting_adults(tmp_path: Path) -> None:
 
     records = list(survey.read_responses(path))
 
-    assert len(records) == 2
+    assert len(records) == 3
     assert {r.source for r in records} == {"survey"}
     assert records[0].city == "Pune"
     assert "[PHONE]" in records[0].text

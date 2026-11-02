@@ -8,17 +8,16 @@ Claude must not run the steps that touch `data/splits/test/`, per `CLAUDE.md`.
 ## 1. Collect
 
 ```bash
-python -m v2v.data.youtube --out data/raw/youtube.jsonl
-python -m v2v.data.reddit --out data/raw/reddit.jsonl
 python -m v2v.data.survey data/raw/responses.csv --out data/raw/survey.jsonl
 ```
 
-Reddit needs an approved app. Skip it if you have none: never scrape around it.
+The survey is the only required source. The Reddit and YouTube collectors are
+optional and need API credentials. Never scrape around them.
 
 ## 2. Filter and prepare
 
 ```bash
-python -m v2v.data.filter data/raw/survey.jsonl data/raw/youtube.jsonl data/raw/reddit.jsonl
+python -m v2v.data.filter data/raw/survey.jsonl
 python -m v2v.nlp.preprocess data/raw/candidates.jsonl
 ```
 

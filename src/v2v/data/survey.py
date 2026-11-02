@@ -23,6 +23,8 @@ REPORT_COLUMNS = (
     "Hazard report 2",
     "Warning message",
     "Unsure report",
+    "All clear report",
+    "False alarm report",
 )
 CONSENT_YES = "I agree"
 ADULT_YES = "Yes"

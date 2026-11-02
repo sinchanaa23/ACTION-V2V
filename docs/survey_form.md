@@ -17,7 +17,7 @@ Replace the `[...]` parts before sending.
 > drivers of road hazards using vehicle-to-vehicle communication. We are asking
 > how drivers really describe hazards, in the way they would actually say them.
 >
-> **What you do:** write 2 to 4 short messages. It takes about 3 minutes.
+> **What you do:** write a few short messages. It takes about 5 minutes.
 >
 > **What we keep:** your written answers and your city. We do not collect your
 > name, phone number or email address. Please do not include names, phone
@@ -53,6 +53,8 @@ you really saw. If you cannot think of one, leave it blank.
 | `Hazard report 2` | Paragraph | No | Another real hazard, a different kind if you can. |
 | `Warning message` | Paragraph | No | What did you last send or say to warn a friend or family member about a road? |
 | `Unsure report` | Paragraph | No | Have you seen something on the road and not been sure what it was? How would you describe it? |
+| `All clear report` | Paragraph | No | Have you told someone a road problem had cleared, or that the road was fine after all? What did you say? |
+| `False alarm report` | Paragraph | No | Think of something you said or heard about the road that turned out not to be a real hazard. How was it worded? |
 
 Put the "Shown wording" in each question's description. The titles stay exact.
 

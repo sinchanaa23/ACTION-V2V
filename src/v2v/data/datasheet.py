@@ -43,14 +43,15 @@ Total records: {len(gold)}
 {_table("Source", sorted(sources.items()))}
 {_table("Hard subset", subsets)}
 ## Collection
-Survey responses from consenting adults, and Reddit and YouTube text through
-their official APIs. All text is real and human-written. None is generated,
-paraphrased, translated or augmented.
+The sources used are listed under Composition. Survey responses come from
+consenting adults, and any Reddit or YouTube text came through their official
+APIs. All text is real and human-written. None is generated, paraphrased,
+translated or augmented.
 
 ## Privacy
 Usernames, phone numbers, plate numbers, emails and URLs are scrubbed before
-storage. Survey responses store no names or contact details. Only Reddit and
-YouTube IDs may be released, never the raw scraped text.
+storage. Survey responses store no names or contact details. For any Reddit or
+YouTube text, only IDs may be released, never the raw scraped text.
 
 ## Annotation
 Labelled in Label Studio using `docs/annotation_guide.md`, with about 20% double

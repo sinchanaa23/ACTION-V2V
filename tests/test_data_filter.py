@@ -66,3 +66,14 @@ def test_filter_removes_near_duplicates_and_prefers_survey() -> None:
     assert stats["raw"] == 4
     assert stats["candidates"] == 2
     assert stats["by_source"] == {"survey": 1, "youtube": 1}
+
+
+def test_survey_answers_skip_the_net_but_not_deduplication() -> None:
+    pytest.importorskip("rapidfuzz")
+    records = [
+        _record("gaadi ruk gayi", "survey", "a"),
+        _record("gaadi ruk gayi!", "survey", "b"),
+        _record("ok", "survey", "c"),
+        _record("nice weather for a walk", "reddit", "d"),
+    ]
+    assert {c.source_id for c in filter_candidates(records)} == {"a", "c"}

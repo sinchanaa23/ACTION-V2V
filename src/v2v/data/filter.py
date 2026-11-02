@@ -4,6 +4,8 @@ Run: python -m v2v.data.filter data/raw/*.jsonl --out data/raw/candidates.jsonl
 
 The net is deliberately wide. Near-misses and negated reports must survive it,
 because the non_actionable class and the hard subsets come from the same text.
+Survey answers skip the net: people wrote them on purpose, in their own words, so
+only near-duplicates are removed.
 """
 
 import argparse
@@ -65,7 +67,7 @@ def drop_near_duplicates(
 
 def filter_candidates(records: Iterable[RawRecord]) -> list[Candidate]:
     """Apply the net, remove near-duplicates and tag each record's language."""
-    netted = [rec for rec in records if in_net(rec.text)]
+    netted = [rec for rec in records if rec.source == "survey" or in_net(rec.text)]
     return [
         Candidate(**rec.model_dump(), language=language_mix(rec.text))
         for rec in drop_near_duplicates(netted)
