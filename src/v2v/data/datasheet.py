@@ -11,6 +11,7 @@ from typing import Any
 
 from v2v.contracts import HazardType
 from v2v.data.annotate import GoldRecord, kappa_report, load_exports, read_gold
+from v2v.data.survey import FIXED_OPTION_REPORT_PREFIX
 
 
 def _table(header: str, counts: Iterable[tuple[str, int]]) -> str:
@@ -27,6 +28,14 @@ def render(gold: Sequence[GoldRecord], kappa: dict[str, Any]) -> str:
         ("Hedged", sum(r.hedged for r in gold)),
         ("No location span", sum(not r.locations for r in gold)),
     ]
+    fixed = sum(r.report_id.startswith(FIXED_OPTION_REPORT_PREFIX) for r in gold)
+    fixed_note = (
+        f"\n{fixed} survey records are fixed-option text: the team wrote these sentences\n"
+        "and respondents picked from them, so they are not drivers' own words. Each\n"
+        "distinct sentence is counted once.\n"
+        if fixed
+        else ""
+    )
     kappas = "\n".join(f"- {key}: {value}" for key, value in sorted(kappa.items()))
     return f"""# Dataset datasheet
 
@@ -47,7 +56,7 @@ The sources used are listed under Composition. Survey responses come from
 consenting adults, and any Reddit or YouTube text came through their official
 APIs. All text is real and human-written. None is generated, paraphrased,
 translated or augmented.
-
+{fixed_note}
 ## Privacy
 Usernames, phone numbers, plate numbers, emails and URLs are scrubbed before
 storage. Survey responses store no names or contact details. For any Reddit or
