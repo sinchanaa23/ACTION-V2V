@@ -23,8 +23,25 @@ python -m v2v.sim.traci_loop sim_out/scenarios/hebbal/noisy-medium-s0   # play o
 python -m v2v.sim.recorder sim_out/scenarios/hebbal/*-s0   # record runs for the dashboard
 pip install -e ".[dashboard]" && streamlit run dashboard/app.py
 V2V_NETWORK_TESTS=1 pytest tests/test_osm_network.py tests/test_gazetteer.py \
-    tests/test_scenarios.py tests/test_traci_loop.py
+    tests/test_scenarios.py tests/test_traci_loop.py tests/test_live.py
 ```
+
+Interactive 3D simulation (Panda3D/Ursina, free and open source; runs on integrated
+graphics). Real Hebbal roads and flyovers, OSM buildings and lake, live SUMO traffic;
+each report runs through the real pipeline and the view shows the geocast zone, every
+V2V hop along the actual relay tree (in slow motion), and who was warned, missed or
+warned needlessly against SUMO's ground truth:
+
+```bash
+pip install -e ".[sim,sim3d]"
+python -m v2v.sim.world3d --corridor hebbal       # once: buildings, water, parks
+python dashboard/sim3d/app.py                    # --scenario noisy-low-s0 --config baseline_a
+```
+
+Right-drag rotate, scroll zoom, WASD/middle-drag pan, click a vehicle or the hazard.
+Space play/pause, K skip to the event, N step, R reset, F follow, G ground truth,
+1-7 speed, [ ] scenario, Tab panels, F11 full screen. Report text stays fixture text
+(labelled in the HUD) until P1's real test split exists.
 
 Configs: `baseline_a`, `baseline_b`, `proposed`, `ablation_direction`,
 `ablation_confidence`. Right now the pipeline runs on stubs and a toy two-way road

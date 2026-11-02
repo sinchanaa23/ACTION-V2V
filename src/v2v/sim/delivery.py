@@ -60,6 +60,9 @@ class DeliveryOutcome(BaseModel):
     """Every successful reception, including duplicates and unaddressed vehicles."""
     hops: dict[str, int]
     """Addressed vehicle -> hop count at first reception."""
+    relays: dict[str, str] = {}
+    """Addressed vehicle -> the transmitter it first heard the warning from
+    (the sender's id, or "origin" for the hazard point)."""
 
 
 @dataclass(frozen=True)
@@ -85,6 +88,7 @@ class DeliveryModel:
         origin = self._origin(world, hazard, sender_id)
         received_ms: dict[str, float] = {}
         hops: dict[str, int] = {}
+        heard_from: dict[str, str] = {}
         transmissions = receptions = 0
         # (time the transmission starts, tie-break counter, x, y, hop count, transmitter id)
         queue: list[tuple[float, int, float, float, int, str]] = [
@@ -108,6 +112,7 @@ class DeliveryModel:
                     continue
                 received_ms[v.vehicle_id] = t_ms + hop_ms
                 hops[v.vehicle_id] = hop + 1
+                heard_from[v.vehicle_id] = sender
                 if self.multi_hop and v.vehicle_id in addressed and hop + 1 < self.max_hops:
                     heapq.heappush(queue, (t_ms + hop_ms, counter, v.x, v.y, hop + 1, v.vehicle_id))
                     counter += 1
@@ -126,6 +131,7 @@ class DeliveryModel:
             transmissions=transmissions,
             receptions=receptions,
             hops={vid: h for vid, h in hops.items() if vid in addressed},
+            relays={vid: s for vid, s in heard_from.items() if vid in addressed},
         )
 
     def _origin(
