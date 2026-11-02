@@ -10,11 +10,13 @@ the real pipeline (P2's reading, P3's confidence, P4's geocast and Nakagami
 delivery), and the view shows what happened: the geocast zone, every V2V hop
 in slow motion along the actual relay tree, and who was warned, missed or
 warned needlessly against SUMO's ground truth. Report text is fixture text
-until P1's real test split exists, and the HUD says so.
+until P1's real test split exists, and the card says so.
 
-Mouse: right-drag rotate, scroll zoom, middle-drag or WASD pan, left-click a
-vehicle or the hazard. Keys: space play/pause, N step, R reset, F follow,
-G ground truth, K skip to the event, Tab panels, 1-7 speed, [ ] scenario,
+It opens as a scroll-driven tour: the wheel (or the arrow keys) glides the
+camera through a few chapters of the corridor. Dragging switches to free
+exploring; T returns to the tour. Click a vehicle or the hazard for details.
+Keys: space play/pause, N step, R reset, K skip to the event, F follow,
+G ground truth, C controls, Tab hide the interface, 1-7 speed, [ ] scenario,
 Esc deselect, F11 full screen.
 """
 
@@ -23,6 +25,7 @@ import math
 import os
 import sys
 import time
+import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # sibling modules
@@ -30,9 +33,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))  # sibling modules
 REPO = Path(__file__).resolve().parents[2]
 os.chdir(REPO)  # scenario files use repo-relative paths
 
-from geom import lerp_angle, slow_motion, to_ursina  # noqa: E402
-from hud import AMBER, BLUE, CYAN, GREEN, MUTED, ORANGE, RED, WHITE, Hud, muted, tint, wrap  # noqa: E402
+from atmosphere import FOG_RANGE, HORIZON, additive, fog_shader, hills, sky_dome
+from geom import lerp_angle, slow_motion, to_ursina
+from hud import (
+    AMBER,
+    BLUE,
+    CYAN,
+    GREEN,
+    MUTED,
+    ORANGE,
+    RED,
+    WHITE,
+    Hud,
+    faint,
+    muted,
+    spaced,
+    tint,
+    wrap,
+)
 from meshes import (
+    beam,
     build_city,
     build_decor,
     build_roads,
@@ -42,8 +62,9 @@ from meshes import (
     ring,
     translucent,
     zone_overlay,
-)  # noqa: E402
-from ursina import (  # noqa: E402
+)
+from tour import Chapter, Scroll, Shot, blend, chapters, parallax, pose_at, principal_axis
+from ursina import (
     BoxCollider,
     Entity,
     Mesh,
@@ -58,37 +79,46 @@ from ursina import (  # noqa: E402
     scene,
     window,
 )
-from ursina import (
-    time as utime,
-)
-from ursina.shaders import unlit_shader  # noqa: E402
-from worker import FiredEvent, SimWorker, Snapshot  # noqa: E402
+from ursina import time as utime
+from ursina.shaders import unlit_shader
+from worker import FiredEvent, SimWorker, Snapshot
 
-from v2v.experiments import CONFIGS  # noqa: E402
-from v2v.sim.delivery import DEFAULT_MODEL  # noqa: E402
-from v2v.sim.live import ORIGIN, WarningEvent, scenario_specs  # noqa: E402
-from v2v.sim.osm_network import CORRIDORS  # noqa: E402
-from v2v.sim.world3d import build_scene, context_paths  # noqa: E402
+from v2v.experiments import CONFIGS
+from v2v.sim.delivery import DEFAULT_MODEL
+from v2v.sim.live import ORIGIN, WarningEvent, scenario_specs
+from v2v.sim.osm_network import CORRIDORS
+from v2v.sim.world3d import Scene, build_scene, context_paths
 
 CORRIDOR = CORRIDORS["hebbal"]
 NET_DIR = REPO / "sim_out" / "networks" / CORRIDOR.name
 SCENARIO_DIR = REPO / "sim_out" / "scenarios" / CORRIDOR.name
 SPEEDS = (0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0)
 CONFIG_NAMES = tuple(CONFIGS)
-NEUTRAL = color.rgba(0.74, 0.79, 0.88, 1)
-HALO = color.rgba(0.2, 0.24, 0.32, 1)
-"""Dim ring under an ordinary vehicle: entity alpha is ignored by the unlit shader."""
-SKY = color.rgba(0.018, 0.026, 0.05, 1)
+PAINTS = (
+    (0.86, 0.87, 0.89),
+    (0.86, 0.87, 0.89),
+    (0.55, 0.58, 0.62),
+    (0.55, 0.58, 0.62),
+    (0.2, 0.21, 0.24),
+    (0.1, 0.1, 0.11),
+    (0.16, 0.3, 0.3),
+    (0.14, 0.24, 0.44),
+    (0.62, 0.57, 0.47),
+)
+"""Ordinary car colours, picked per vehicle id so each car keeps its colour."""
+SKY = color.rgba(*HORIZON, 1)
 
 
 def rgba(rgb: tuple[float, float, float], a: float = 1.0) -> color.Color:
     return color.rgba(*rgb, a)
 
 
-def instance(mesh: Mesh, tint_to: color.Color | None = None, **kwargs: object) -> Entity:
+def instance(
+    mesh: Mesh, tint_to: color.Color | None = None, shader: object = fog_shader, **kwargs: object
+) -> Entity:
     """An entity drawing a shared mesh. Assigning one Mesh as ``model`` to many
     entities would reparent it each time; instancing shares it instead."""
-    e = Entity(shader=unlit_shader, **kwargs)  # type: ignore[arg-type]
+    e = Entity(shader=shader, **kwargs)  # type: ignore[arg-type]
     mesh.instanceTo(e)
     if tint_to is not None:
         paint(e, tint_to)
@@ -104,74 +134,157 @@ def cardinal(h: float) -> str:
     return ("N", "NE", "E", "SE", "S", "SW", "W", "NW")[round(h / 45) % 8]
 
 
+def paint_for(vid: str) -> tuple[float, float, float]:
+    return PAINTS[zlib.crc32(vid.encode()) % len(PAINTS)]
+
+
 # --- camera ------------------------------------------------------------------------------
 
 
 class CameraRig(Entity):
-    """Orbit / pan / zoom around a pivot, or chase a vehicle in follow mode."""
+    """The scroll-driven tour, or free orbit / pan / zoom / chase when exploring.
 
-    def __init__(self) -> None:
+    Tour: the wheel moves ``scroll``; the pose glides along the chapter path,
+    with a little mouse parallax. Explore: right-drag turns, middle-drag or
+    WASD pans, the wheel zooms, F chases a vehicle."""
+
+    def __init__(self, shots: list[Shot]) -> None:
         super().__init__()
         camera.parent = self
         camera.position = (0, 0, -600)
         camera.rotation = (0, 0, 0)
-        camera.fov = 55
-        camera.clip_plane_far = 7000
-        self.yaw, self.pitch, self.dist = 20.0, 38.0, 650.0
-        self.goal = Vec3(0, 0, 0)
+        camera.clip_plane_near = 1.5
+        camera.clip_plane_far = 12000
+        self.scroll = Scroll(len(shots))
+        self.shots = shots
+        self.mode = "tour"
+        self.pose = shots[0]
+        self.free = shots[0]
         self.follow: Entity | None = None
+        self.mx = self.my = 0.0
+        self.scrolled_at = -1e9
+        self.on_mode: object = None
+        self.apply(self.pose)
 
-    def look_at_point(self, p: Vec3, dist: float | None = None) -> None:
-        self.goal = Vec3(p)
-        if dist is not None:
-            self.dist = dist
+    @property
+    def shots(self) -> list[Shot]:
+        return self._shots
+
+    @shots.setter
+    def shots(self, shots: list[Shot]) -> None:
+        self._shots = shots
+        self.scroll.count = len(shots)
+        self.scroll.go(self.scroll.target)
+
+    @property
+    def dist(self) -> float:
+        return self.pose.dist
+
+    def explore(self) -> None:
+        if self.mode != "explore":
+            self.mode = "explore"
+            self.free = self.pose
+            if callable(self.on_mode):
+                self.on_mode()
+
+    def tour(self) -> None:
+        self.mode = "tour"
+        self.follow = None
+        if callable(self.on_mode):
+            self.on_mode()
+
+    def fly_to(self, focus: Vec3, dist: float, pitch: float | None = None) -> None:
+        self.explore()
+        self.free = Shot(
+            (focus.x, focus.y, focus.z),
+            self.free.yaw,
+            pitch if pitch is not None else self.free.pitch,
+            dist,
+            self.free.fov,
+        )
+
+    def apply(self, p: Shot) -> None:
+        self.position = Vec3(*p.focus)
+        self.rotation = (p.pitch, p.yaw, 0)
+        camera.z = -p.dist
+        camera.fov = p.fov
 
     def update(self) -> None:
         dt = utime.dt
-        if mouse.right:
-            self.yaw += mouse.velocity[0] * 220
-            self.pitch = min(86.0, max(6.0, self.pitch - mouse.velocity[1] * 140))
-        self.yaw += (held_keys["e"] - held_keys["q"]) * 70 * dt
-        pan = self.dist * 0.9 * dt
-        fwd = Vec3(math.sin(math.radians(self.yaw)), 0, math.cos(math.radians(self.yaw)))
-        right = Vec3(fwd.z, 0, -fwd.x)
-        move = fwd * (held_keys["w"] - held_keys["s"]) + right * (held_keys["d"] - held_keys["a"])
-        if mouse.middle:
-            move -= right * mouse.velocity[0] * 60 + fwd * mouse.velocity[1] * 60
-        if move.length() > 0 and self.follow is None:
-            self.goal += move * pan
-        if self.follow is not None:
-            target = self.follow.world_position
-            self.goal = Vec3(target.x, target.y + 2, target.z)
-            if not mouse.right:  # swing in behind the vehicle
-                self.yaw = lerp_angle(self.yaw, self.follow.rotation_y, min(1.0, dt * 1.5))
-        k = min(1.0, dt * (6 if self.follow is not None else 9))
-        self.position = self.position + (self.goal - self.position) * k
-        self.rotation_y += ((self.yaw - self.rotation_y + 180) % 360 - 180) * k
-        self.rotation_x += (self.pitch - self.rotation_x) * k
-        camera.z += (-self.dist - camera.z) * k
+        a = window.aspect_ratio
+        k = 1.0 - math.exp(-dt * 2.5)
+        self.mx += (max(-0.5, min(0.5, mouse.x / a)) - self.mx) * k
+        self.my += (max(-0.5, min(0.5, mouse.y)) - self.my) * k
+        progress = self.scroll.update(dt)
+        dragging = mouse.right or mouse.middle
+        keys = {k: held_keys[k] for k in "wasdqe"}
+        if (dragging or any(keys.values())) and self.mode == "tour":
+            self.explore()
+        if self.mode == "tour":
+            breathe = math.sin(time.perf_counter() * 0.25) * 0.6  # the camera is held, not fixed
+            target = parallax(pose_at(self.shots, progress), self.mx, self.my)
+            target = Shot(target.focus, target.yaw + breathe, target.pitch, target.dist, target.fov)
+            self.pose = blend(self.pose, target, 1.0 - math.exp(-dt * 5.0))
+        else:
+            f = self.free
+            yaw, pitch, dist = f.yaw, f.pitch, f.dist
+            focus = Vec3(*f.focus)
+            if mouse.right:
+                yaw += mouse.velocity[0] * 220
+                pitch = min(86.0, max(4.0, pitch - mouse.velocity[1] * 140))
+            yaw += (keys["e"] - keys["q"]) * 70 * dt
+            fwd = Vec3(math.sin(math.radians(yaw)), 0, math.cos(math.radians(yaw)))
+            right = Vec3(fwd.z, 0, -fwd.x)
+            move = fwd * (keys["w"] - keys["s"]) + right * (keys["d"] - keys["a"])
+            if mouse.middle:
+                move -= right * mouse.velocity[0] * 60 + fwd * mouse.velocity[1] * 60
+            if self.follow is not None:
+                t = self.follow.world_position
+                focus = Vec3(t.x, t.y + 2, t.z)
+                if not mouse.right:  # swing in behind the vehicle
+                    yaw = lerp_angle(yaw, self.follow.rotation_y, min(1.0, dt * 1.5))
+            elif move.length() > 0:
+                focus += move * dist * 0.9 * dt
+            self.free = Shot((focus.x, focus.y, focus.z), yaw % 360, pitch, dist, 50.0)
+            self.pose = blend(
+                self.pose,
+                self.free,
+                1.0 - math.exp(-dt * (6.0 if self.follow is not None else 9.0)),
+            )
+        self.apply(self.pose)
 
     def input(self, key: str) -> None:
-        if key == "scroll up":
-            self.dist = max(12.0, self.dist * 0.86)
-        elif key == "scroll down":
-            self.dist = min(3200.0, self.dist * 1.16)
+        notches = {"scroll down": 1, "scroll up": -1}.get(key)
+        if notches is None:
+            return
+        if self.mode == "tour":
+            self.scroll.wheel(notches)
+            self.scrolled_at = time.perf_counter()
+        else:
+            f = self.free
+            dist = max(12.0, min(4000.0, f.dist * (1.16 if notches > 0 else 0.86)))
+            self.free = Shot(f.focus, f.yaw, f.pitch, dist, f.fov)
 
 
-# --- the simulation view -----------------------------------------------------------------
+# --- vehicles and signals ----------------------------------------------------------------
 
 
 class Car:
     def __init__(self, view: "SimView", vid: str, model: Mesh, blocking: bool = False) -> None:
         self.vid = vid
         self.blocking = blocking
-        self.body = instance(model, tint_to=NEUTRAL, double_sided=True)
+        self.paint = RED if blocking else paint_for(vid)
+        self.body = instance(model, tint_to=rgba(self.paint), double_sided=True)
         self.body.collider = BoxCollider(
-            self.body, center=Vec3(0, 0.8, 0), size=Vec3(2.2, 1.8, 4.8)
+            self.body, center=Vec3(0, 0.8, 0), size=Vec3(2.6, 2.2, 5.4)
         )
         self.body.on_click = lambda: view.select(("vehicle", vid))
-        self.halo = instance(view.halo_mesh, tint_to=HALO, parent=self.body, y=0.12)
+        # not children of the body: a child's tint would be multiplied by the car's paint
+        self.marker = additive(instance(view.beam_mesh, shader=unlit_shader))
+        self.marker.enabled = False
+        self.halo = translucent(instance(view.halo_mesh, shader=unlit_shader))
         self.halo.enabled = False
+        self.status: tuple[float, float, float] | None = None
         self.target = Vec3(0, 0, 0)
         self.heading = 0.0
         self.fresh = True
@@ -184,51 +297,83 @@ class Car:
             self.body.rotation_y = heading
             self.fresh = False
 
-    def update(self, dt: float) -> None:
+    def mark(self, rgb: tuple[float, float, float] | None, selected: bool) -> None:
+        """Ordinary cars keep their paint; a car the story is about glows."""
+        if rgb == self.status and not selected and not self.marker.enabled:
+            return
+        self.status = rgb
+        paint(self.body, rgba(rgb if rgb else self.paint))
+        lit = rgb is not None or selected
+        self.marker.enabled = self.halo.enabled = lit
+        if lit:
+            c = rgb or WHITE
+            paint(self.marker, rgba(c, 0.55 if selected else 0.4))
+            paint(self.halo, rgba(c, 0.5))
+
+    def update(self, dt: float, size: float, beam_h: float) -> None:
         k = min(1.0, dt * 7)
         self.body.position = self.body.position + (self.target - self.body.position) * k
         self.body.rotation_y = lerp_angle(self.body.rotation_y, self.heading, k)
+        self.body.scale = size
+        if self.halo.enabled:
+            self.halo.position = self.body.position + Vec3(0, 0.15, 0)
+            self.halo.scale = size
+        if self.marker.enabled:
+            self.marker.position = self.body.position
+            self.marker.scale = (max(0.6, beam_h * 0.05), beam_h, max(0.6, beam_h * 0.05))
 
     def destroy(self) -> None:
         destroy(self.body)
+        destroy(self.marker)
+        destroy(self.halo)
 
 
 class PulseFx:
-    """One V2V hop drawn in slow motion: a glowing packet with a beam behind it."""
+    """One V2V hop in slow motion: a small light travelling a soft arc, leaving a fading trace."""
+
+    SEGMENTS = 14
 
     def __init__(
         self, a: Vec3, b: Vec3, t0: float, t1: float, rgb: tuple[float, float, float], on_arrive
     ) -> None:  # type: ignore[no-untyped-def]
-        self.a, self.b, self.t0, self.t1 = a, b, t0, t1
+        self.a, self.b, self.t0, self.t1, self.rgb = a, b, t0, t1, rgb
         self.on_arrive = on_arrive
-        self.dot = Entity(
-            model="sphere",
-            shader=unlit_shader,
-            color=rgba(rgb),
-            scale=3.2,
-            position=a,
-            enabled=False,
+        self.lift = min(18.0, 2.0 + (b - a).length() * 0.08)
+        self.dot = additive(
+            Entity(
+                model="sphere",
+                shader=unlit_shader,
+                color=rgba(rgb, 1),
+                scale=1.8,
+                position=a,
+                enabled=False,
+            )
         )
-        self.glow = Entity(
-            parent=self.dot, model="sphere", shader=unlit_shader, color=rgba(rgb, 0.25), scale=2.4
-        )
-        self.beam = Entity(
-            model=Mesh(vertices=[a, a], mode="line", thickness=3),
-            shader=unlit_shader,
-            color=rgba(rgb, 0.8),
-            enabled=False,
+        self.trail = additive(
+            Entity(
+                model=Mesh(
+                    vertices=[a, a], colors=[rgba(rgb, 0), rgba(rgb, 0)], mode="line", thickness=2
+                ),
+                shader=unlit_shader,
+                enabled=False,
+            )
         )
         self.done = False
+
+    def at(self, f: float) -> Vec3:
+        return self.a + (self.b - self.a) * f + Vec3(0, math.sin(f * math.pi) * self.lift, 0)
 
     def update(self, now: float) -> None:
         if now < self.t0:
             return
         f = min(1.0, (now - self.t0) / max(self.t1 - self.t0, 1e-3))
-        p = self.a + (self.b - self.a) * f + Vec3(0, math.sin(f * math.pi) * 6, 0)
-        self.dot.enabled = self.beam.enabled = True
-        self.dot.position = p
-        self.beam.model.vertices = [self.a, p]
-        self.beam.model.generate()
+        self.dot.enabled = self.trail.enabled = not self.done
+        self.dot.position = self.at(f)
+        n = self.SEGMENTS
+        pts = [self.at(f * i / n) for i in range(n + 1)]
+        self.trail.model.vertices = pts
+        self.trail.model.colors = [rgba(self.rgb, 0.55 * (i / n) ** 1.5) for i in range(n + 1)]
+        self.trail.model.generate()
         if f >= 1.0 and not self.done:
             self.done = True
             self.on_arrive()
@@ -239,16 +384,18 @@ class PulseFx:
             return False
         age = now - self.t1
         self.dot.enabled = False
-        self.beam.color = rgba(CYAN, max(0.0, 0.8 - age * 0.6))
-        return age > 1.5
+        k = max(0.0, 1.0 - age / 1.2)
+        self.trail.enabled = k > 0
+        paint(self.trail, color.rgba(1, 1, 1, k))
+        return age > 1.2
 
     def destroy(self) -> None:
         destroy(self.dot)
-        destroy(self.beam)
+        destroy(self.trail)
 
 
 class Wave:
-    """An expanding ring (radio range, arrival flash)."""
+    """An expanding ring of light (radio range, arrival flash)."""
 
     def __init__(
         self,
@@ -257,41 +404,50 @@ class Wave:
         radius: float,
         rgb: tuple[float, float, float],
         duration: float,
+        strength: float = 0.7,
     ) -> None:
-        self.e = translucent(
-            instance(view.unit_ring, tint_to=rgba(rgb), position=p + Vec3(0, 0.6, 0), scale=0.01)
+        self.e = additive(
+            instance(
+                view.unit_ring,
+                tint_to=rgba(rgb, strength),
+                shader=unlit_shader,
+                position=p + Vec3(0, 0.6, 0),
+                scale=0.01,
+            )
         )
-        self.radius, self.rgb, self.duration, self.start = (
-            radius,
-            rgb,
-            duration,
-            time.perf_counter(),
-        )
+        self.radius, self.rgb, self.duration, self.strength = radius, rgb, duration, strength
+        self.start = time.perf_counter()
 
     def update(self, now: float) -> bool:
         f = (now - self.start) / self.duration
         if f >= 1:
             destroy(self.e)
             return True
-        self.e.scale = max(0.01, self.radius * f)
-        paint(self.e, rgba(tuple(c * (1 - f) for c in self.rgb)))  # type: ignore[arg-type]
+        ease = 1 - (1 - f) ** 3
+        self.e.scale = max(0.01, self.radius * ease)
+        paint(self.e, rgba(self.rgb, self.strength * (1 - f) ** 1.5))
         return False
+
+
+# --- the simulation view -----------------------------------------------------------------
 
 
 class SimView(Entity):
     def __init__(
-        self, worker: SimWorker, world, origin: tuple[float, float], hud: Hud, rig: CameraRig
-    ) -> None:  # type: ignore[no-untyped-def]
+        self, worker: SimWorker, world: Scene, origin: tuple[float, float], hud: Hud, rig: CameraRig
+    ) -> None:
         super().__init__()
         self.worker, self.world, self.origin, self.hud, self.rig = worker, world, origin, hud, rig
         self.lanes = lanes_by_edge(world)
         self.car_model = car_mesh()
-        self.halo_mesh = ring(3.4, 0.9, (1, 1, 1), 1.0, 40)
-        self.unit_ring = ring(1.0, 0.04, (1, 1, 1), 1.0, 96)
+        self.beam_mesh = beam()
+        self.halo_mesh = ring(3.0, 0.5, (1, 1, 1), 1.0, 40)
+        self.unit_ring = ring(1.0, 0.03, (1, 1, 1), 1.0, 128)
         self.cars: dict[str, Car] = {}
         self.version = -1
         self.snap: Snapshot | None = None
         self.selected: tuple[str, ...] | None = None
+        self.hazard_tab = "details"
         self.ground_truth = False
         self.warned_needed: set[str] = set()
         self.warned_unneeded: set[str] = set()
@@ -304,14 +460,14 @@ class SimView(Entity):
             " ",
             parent=scene,
             billboard=True,
-            scale=150,
+            scale=60,
             origin=(0, 0),
             color=rgba(ORANGE),
             enabled=False,
         )
         self.bubble_until = 0.0
         self.tag = Text(
-            " ", parent=scene, billboard=True, scale=110, origin=(0, -0.5), enabled=False
+            " ", parent=scene, billboard=True, scale=40, origin=(0, -0.5), enabled=False
         )
         self._hud_at = 0.0
         self._fps = 60.0
@@ -326,26 +482,72 @@ class SimView(Entity):
     def at_vehicle(self, v) -> Vec3:  # type: ignore[no-untyped-def]
         return self.u(v.x, v.y, self.world.elevation(v.edge_id, v.lane_pos_m))
 
+    # --- the tour ------------------------------------------------------------------------
+
+    def tour_chapters(self) -> list[Chapter]:
+        spec, world = self.worker.spec, self.world
+        h = spec.hazard
+        hazard = self.u(h.x, h.y, world.elevation(h.edge_id, h.pos_m))
+        main = [
+            p
+            for lanes in self.lanes.values()
+            if lanes[0].road_class in ("trunk", "motorway", "primary")
+            for p in lanes[0].points
+        ]
+        axis = principal_axis([(x, y) for x, y, _ in main]) if main else 0.0
+        if main:  # along the highway, a little way from the hazard
+            ax = math.sin(math.radians(axis)), math.cos(math.radians(axis))
+            want = (h.x - ax[0] * 420, h.y - ax[1] * 420)
+            x, y, z = min(main, key=lambda p: math.dist(p[:2], want))
+            road_focus = self.u(x, y, z)
+        else:
+            road_focus = hazard
+        raised = [
+            lanes for lanes in self.lanes.values() if max(p[2] for p in lanes[0].points) > 1.0
+        ]
+        decks = [p for lanes in raised for p in lanes[0].points if p[2] > 3.0]
+        deck = self.u(*min(decks, key=lambda p: math.dist(p[:2], (h.x, h.y)))) if decks else None
+        xmin, ymin, xmax, ymax = world.bounds
+        cfg = CONFIGS[self.worker.config_name]
+        return chapters(
+            (xmax - xmin, ymax - ymin),
+            axis,
+            (road_focus.x, road_focus.y, road_focus.z),
+            (deck.x, deck.y, deck.z) if deck is not None else None,
+            (hazard.x, hazard.y, hazard.z),
+            hazard_name=spec.hazard_class.value.replace("_", " "),
+            place=spec.landmark_names[0] if spec.landmark_names else "",
+            lanes=len(world.lanes),
+            buildings=sum(1 for a in world.areas if a.kind == "building"),
+            decks=len(raised),
+            distribution=cfg.distribution,
+            radius_m=cfg.radius_m,
+        )
+
     # --- hazard and zones --------------------------------------------------------------
 
     def _build_hazard(self) -> None:
         self.hazard = Entity(
-            collider="box", model="cube", scale=(14, 14, 14), color=color.clear, shader=unlit_shader
+            collider="box", model="cube", scale=(16, 16, 16), color=color.clear, shader=unlit_shader
         )
         self.hazard.on_click = lambda: self.select(("hazard",))
-        self.beacon = Entity(
-            parent=self.hazard,
-            model="cube",
-            shader=unlit_shader,
-            scale=(0.08, 3.4, 0.08),
-            y=1.7,
-            color=rgba(RED, 0.75),
+        self.core = Entity(
+            model="cube", shader=unlit_shader, scale=2.4, color=rgba(RED), rotation=(45, 0, 45)
         )
-        self.beacon_ring = Entity(model=ring(14, 2.2, RED, 0.9), shader=unlit_shader)
-        self.sensor = translucent(Entity(model=disc(200, RED, 0.07), shader=unlit_shader))
-        self.sensor_rim = translucent(Entity(model=ring(200, 1.4, RED, 0.45), shader=unlit_shader))
+        self.column = additive(
+            instance(self.beam_mesh, tint_to=rgba(RED, 0.6), shader=unlit_shader, scale=(5, 140, 5))
+        )
+        self.beacon_ring = additive(Entity(model=ring(12, 0.7, RED, 1.0), shader=unlit_shader))
+        self.sensor = translucent(Entity(model=disc(200, RED, 0.05), shader=unlit_shader))
+        self.sensor_rim = additive(Entity(model=ring(200, 1.0, RED, 0.5), shader=unlit_shader))
         self.hazard_label = Text(
-            " ", parent=scene, billboard=True, scale=230, origin=(0, -0.5), color=rgba(RED)
+            " ",
+            parent=scene,
+            billboard=True,
+            scale=70,
+            origin=(0, -0.5),
+            color=rgba(RED),
+            enabled=False,
         )
 
     def load_scenario(self) -> None:
@@ -353,10 +555,10 @@ class SimView(Entity):
         h = spec.hazard
         p = self.u(h.x, h.y, self.world.elevation(h.edge_id, h.pos_m))
         self.hazard_pos = p
-        for e in (self.hazard, self.beacon_ring, self.sensor, self.sensor_rim):
+        for e in (self.hazard, self.beacon_ring, self.sensor, self.sensor_rim, self.column):
             e.position = p + Vec3(0, 0.35, 0)
-        self.hazard.y = p.y + 7
-        self.hazard_label.position = p + Vec3(0, 52, 0)
+        self.hazard.y = p.y + 8
+        self.core.position = p + Vec3(0, 4, 0)
         for car in self.cars.values():
             car.destroy()
         self.cars.clear()
@@ -369,9 +571,9 @@ class SimView(Entity):
         self.missed.clear()
         self.reporters.clear()
         self.rig.follow = None
-        self.rig.look_at_point(p, 260)
-        self.rig.pitch = 34.0
-        self.selected = ("hazard",)
+        self.chapters = self.tour_chapters()
+        self.rig.shots = [c.shot for c in self.chapters]
+        self.select(None)
         self.version = -1
 
     def clear_zone(self) -> None:
@@ -387,21 +589,20 @@ class SimView(Entity):
         centre = self.u(cx, cy, 0.4)
         self.zone_entities += [
             translucent(
-                Entity(model=disc(event.radius_m, rgb, 0.045), shader=unlit_shader, position=centre)
+                Entity(model=disc(event.radius_m, rgb, 0.03), shader=unlit_shader, position=centre)
             ),
-            translucent(
+            additive(
                 Entity(
-                    model=ring(event.radius_m, 2.5, rgb, 0.55),
+                    model=ring(event.radius_m, 1.6, rgb, 0.5),
                     shader=unlit_shader,
                     position=centre + Vec3(0, 0.1, 0),
                 )
             ),
         ]
         if event.zone_edges:
-            self.zone_entities += zone_overlay(self.lanes, event.zone_edges, self.origin).entities(
-                see_through=True
-            )
-        self.waves.append(Wave(self, centre, event.radius_m, rgb, 2.2))
+            for e in zone_overlay(self.lanes, event.zone_edges, self.origin).entities():
+                self.zone_entities.append(additive(e))
+        self.waves.append(Wave(self, centre, event.radius_m, rgb, 2.6, 0.6))
 
     # --- events ------------------------------------------------------------------------
 
@@ -410,18 +611,18 @@ class SimView(Entity):
         r = e.result
         self.reporters.add(e.slot.reporter_id)
         sender = self.u(*e.sender_xy, 1.5)
-        self.bubble.text = f"REPORT  {r.interpretation.hazard.value.replace('_', ' ')}"
-        self.bubble.position = sender + Vec3(0, 20, 0)
+        self.bubble.text = spaced("report")
+        self.bubble.position = sender + Vec3(0, 14, 0)
         self.bubble.enabled = True
-        self.bubble_until = time.perf_counter() + 5
+        self.bubble_until = time.perf_counter() + 3.5
         if not e.sent:
-            self.hud.toast.text = tint(
-                AMBER, f"t={e.t_s:.0f}s  {e.slot.role} report suppressed"
-            ) + muted(f"  ({r.assessed.status}: no warning sent)")
-            self.hud.toast_until = time.perf_counter() + 5
+            self.toast(
+                tint(AMBER, f"{e.slot.role.capitalize()} report at {e.t_s:.0f} s held back")
+                + muted(f"  ·  {r.assessed.status}, no warning sent")
+            )
             return
         self.show_zone(e)
-        self.waves.append(Wave(self, sender, DEFAULT_MODEL.comm_range_m, CYAN, 1.6))
+        self.waves.append(Wave(self, sender, DEFAULT_MODEL.comm_range_m, CYAN, 1.8, 0.5))
         now = time.perf_counter() + 0.4
         latest = max((p.end_ms for p in e.pulses), default=1.0)
         k = slow_motion(latest)
@@ -441,7 +642,9 @@ class SimView(Entity):
                 (self.warned_needed if needed else self.warned_unneeded).add(vid)
                 c = self.cars.get(vid)
                 if c is not None:
-                    self.waves.append(Wave(self, c.body.position, 9, CYAN if needed else BLUE, 0.7))
+                    self.waves.append(
+                        Wave(self, c.body.position, 8, CYAN if needed else BLUE, 0.8, 0.8)
+                    )
 
             self.pulses.append(
                 PulseFx(
@@ -449,20 +652,25 @@ class SimView(Entity):
                 )
             )
         self.missed = set(e.missed)
-        self.hud.toast.text = (
-            (tint(RED, "FALSE ALARM  ") if e.false_alarm else "")
-            + tint(CYAN, f"{e.slot.role} report -> {r.assessed.status} warning")
-            + muted(
-                f"   {len(r.warning.recipients) if r.warning else 0} addressed · {len(e.delivered)} delivered · "
-            )
+        self.toast(
+            (tint(RED, "False alarm  ·  ") if e.false_alarm else "")
+            + tint(CYAN, f"{r.assessed.status.capitalize()} warning sent")
+            + muted(f"  ·  {len(e.delivered)} warned, ")
             + tint(RED, f"{len(e.missed)} missed")
-            + muted(f"   V2V shown {k * 1000:.0f}x slower")
+            + faint(f"  ·  radio shown {k * 1000:.0f}× slower")
         )
-        self.hud.toast_until = time.perf_counter() + 6
+        if self.rig.mode == "tour" and time.perf_counter() - self.rig.scrolled_at > 3.0:
+            self.rig.scroll.go(next(i for i, c in enumerate(self.chapters) if c.key == "geocast"))
+
+    def toast(self, text: str, seconds: float = 6.0) -> None:
+        self.hud.toast.text = text
+        self.hud.toast_until = time.perf_counter() + seconds
 
     # --- selection -----------------------------------------------------------------------
 
     def select(self, what: tuple[str, ...] | None) -> None:
+        if what != self.selected and what == ("hazard",):
+            self.hazard_tab = "details"
         self.selected = what
         if what is None:
             self.rig.follow = None
@@ -471,7 +679,7 @@ class SimView(Entity):
     def toggle_follow(self) -> None:
         if self.rig.follow is not None:
             self.rig.follow = None
-            self.rig.dist = 220
+            self.rig.free = Shot(self.rig.free.focus, self.rig.free.yaw, 30.0, 220.0)
             return
         if self.selected and self.selected[0] == "vehicle" and self.selected[1] in self.cars:
             car = self.cars[self.selected[1]]
@@ -481,8 +689,10 @@ class SimView(Entity):
                 return
             car = self.cars[near[0].vehicle_id]
             self.select(("vehicle", car.vid))
+        self.rig.explore()
         self.rig.follow = car.body
-        self.rig.dist, self.rig.pitch = 42.0, 16.0
+        f = self.rig.free
+        self.rig.free = Shot(f.focus, f.yaw, 14.0, 34.0, f.fov)
 
     def nearest_vehicles(self, n: int):  # type: ignore[no-untyped-def]
         if self.snap is None:
@@ -517,34 +727,39 @@ class SimView(Entity):
             self.apply(snap)
         for fired in self.worker.drain():
             self.fire(fired)
-        size = min(7.0, max(1.0, self.rig.dist / 110))  # true size up close, legible from afar
-        words = max(18.0, self.rig.dist * 0.42)  # world labels stay readable at any zoom
-        self.tag.scale = words * 0.8
-        self.bubble.scale = words
-        self.hazard_label.scale = max(40.0, self.rig.dist * 0.75)
+        dist = self.rig.dist
+        size = min(2.2, max(1.0, dist / 260))  # true size up close, a touch larger from afar
+        beam_h = min(150.0, max(6.0, dist * 0.16))  # a hint up close, a beacon from afar
         for car in self.cars.values():
-            car.update(dt)
-            car.body.scale = size
+            car.update(dt, size, beam_h)
+        words = max(14.0, dist * 0.16)
+        self.tag.scale = words
+        self.bubble.scale = words * 1.1
+        self.hazard_label.scale = words * 2.2
         for fx in list(self.pulses):
             fx.update(now)
             if fx.fade(now):
                 fx.destroy()
                 self.pulses.remove(fx)
         self.waves = [w for w in self.waves if not w.update(now)]
-        self.beacon_ring.rotation_y += 40 * dt
-        pulse = 0.5 + 0.5 * math.sin(now * 4)
         active = snap is not None and snap.event_active
-        self.beacon.color = rgba(RED, 0.4 + 0.5 * pulse) if active else rgba(MUTED, 0.35)
+        pulse = 0.5 + 0.5 * math.sin(now * 3)
+        self.core.rotation_y += 50 * dt
+        self.core.enabled = active
+        paint(self.column, rgba(RED, 0.25 + 0.3 * pulse) if active else rgba(MUTED, 0.12))
+        self.beacon_ring.scale = 1 + 0.25 * pulse if active else 1
         self.beacon_ring.color = rgba(RED, 0.5 + 0.4 * pulse) if active else rgba(MUTED, 0.3)
-        self.sensor.enabled = self.sensor_rim.enabled = active
+        hazard_on = self.selected == ("hazard",)
+        self.sensor.enabled = self.sensor_rim.enabled = active and hazard_on
         for car in self.cars.values():
             if car.blocking:
                 car.halo.enabled = True
-                paint(car.halo, rgba(AMBER) if int(now * 3) % 2 else HALO)
+                paint(car.halo, rgba(AMBER, 0.6) if int(now * 3) % 2 else rgba(RED, 0.3))
         if self.bubble.enabled and now > self.bubble_until:
             self.bubble.enabled = False
-        if self.hud.toast.text and now > self.hud.toast_until:
-            self.hud.toast.text = ""
+        if self.hud.toast.text.strip() and now > self.hud.toast_until:
+            self.hud.toast.text = " "
+        self.refresh_tour()
         if now - self._hud_at > 0.2:
             self._hud_at = now
             self.refresh_hud()
@@ -552,212 +767,243 @@ class SimView(Entity):
     def apply(self, snap: Snapshot) -> None:
         self.snap = snap
         seen = set()
+        sel = self.selected[1] if self.selected and self.selected[0] == "vehicle" else None
         for group, blocking in ((snap.vehicles, False), (snap.blocking, True)):
             for vid, v in group.items():
                 seen.add(vid)
                 car = self.cars.get(vid)
                 if car is None:
                     car = self.cars[vid] = Car(self, vid, self.car_model, blocking)
-                    if blocking:
-                        paint(car.body, rgba(RED))
                 car.place(self.at_vehicle(v), v.heading_deg)
                 if not blocking:
-                    rgb, _ = self.status_colour(vid)
-                    paint(car.body, rgba(rgb) if rgb else NEUTRAL)
-                    car.halo.enabled = True
-                    paint(car.halo, rgba(rgb) if rgb else HALO)
+                    car.mark(self.status_colour(vid)[0], vid == sel)
         for vid in [v for v in self.cars if v not in seen]:
             if self.rig.follow is self.cars[vid].body:
                 self.rig.follow = None
             self.cars.pop(vid).destroy()
 
-    # --- HUD ----------------------------------------------------------------------------------
+    # --- interface -------------------------------------------------------------------------
+
+    def refresh_tour(self) -> None:
+        rig = self.rig
+        progress = rig.scroll.value
+        c = self.chapters[round(progress)]
+        exploring = rig.mode == "explore"
+        self.hud.chapter(
+            progress,
+            [ch.key for ch in self.chapters],
+            f"{round(progress) + 1:02d} / {len(self.chapters):02d}",
+            c.title,
+            c.caption,
+            show_caption=not exploring
+            and self.hud.shown
+            and not self.hud.dock.open
+            and not self.hud.card.visible,
+        )
 
     def refresh_hud(self) -> None:
-        hud, snap, spec = self.hud, self.snap, self.worker.spec
-        w = self.worker
+        hud, snap, spec, w = self.hud, self.snap, self.worker.spec, self.worker
         events = w.events()
-        state = {
-            "running": tint(GREEN, "SUMO LIVE"),
-            "paused": tint(AMBER, "PAUSED"),
-            "ready": tint(AMBER, "READY"),
-            "finished": tint(MUTED, "FINISHED"),
-            "fast-forward": tint(CYAN, "FAST-FORWARD"),
-        }.get(w.status, tint(AMBER, w.status.upper()))
+        t = snap.t_s if snap else 0.0
+        live = {
+            "running": (GREEN, "live"),
+            "paused": (AMBER, "paused"),
+            "ready": (AMBER, "ready"),
+            "finished": (MUTED, "finished"),
+            "fast-forward": (CYAN, "skipping"),
+        }.get(w.status, (AMBER, w.status))
         if w.error:
-            state = tint(RED, "SUMO ERROR")
-        sent = [e for e in events if e.sent]
-        cfg = CONFIGS[w.config_name]
+            live = (RED, "SUMO error")
+        hud.live_dot.color = rgba(live[0])
         hud.status.text = (
-            f"{state}   {muted('t')} {snap.t_s if snap else 0:.0f}s   "
-            f"{muted('vehicles')} {len(snap.vehicles) if snap else 0}   "
-            f"{muted('reports')} {len(events)}   {muted('warnings')} {len(sent)}   "
-            f"{muted('config')} {cfg.name} ({cfg.distribution})   "
-            f"{muted(f'{self._fps:.0f} fps')}"
+            f"{faint(spaced(live[1]))}   {tint(WHITE, f'{t:.0f} s')}   {faint(f'{w.speed:g}×')}"
         )
-        hud.scenario_l.text = f"{spec.condition} · {spec.density} · seed {spec.seed}"
-        hud.config_l.text = cfg.name
-        hud.play_b.text = "Pause" if w.playing else "Play"
-        hud.follow_b.text = "Orbit" if self.rig.follow is not None else "Follow"
-        hud.highlight(hud.speed_bs, SPEEDS.index(w.speed) if w.speed in SPEEDS else None)
-        hud.timeline(
-            snap.t_s if snap else 0.0,
-            spec.end_s,
-            (spec.event_start_s, spec.event_end_s) if spec.event_occurred else None,
-            [e.t_s for e in events],
-        )
-        hud.time_l.text = f"{snap.t_s if snap else 0:.0f} / {spec.end_s:.0f} s" + muted(
-            f"   event {spec.event_start_s:.0f}-{spec.event_end_s:.0f} s"
-            if spec.event_occurred
-            else "   no real event"
-        )
-        active = snap is not None and snap.event_active
-        name = spec.hazard_class.value.replace("_", " ")
-        self.hazard_label.text = (
-            name.upper()
-            if active
-            else (
-                f"{name} (not on the road)"
-                if not spec.event_occurred
-                else f"{name} (not yet)"
-                if snap and snap.t_s < spec.event_start_s
-                else f"{name} (cleared)"
+        hud.mode_b.text = "Back to tour" if self.rig.mode == "explore" else "Explore freely"
+        dock = hud.dock
+        dock.play_icon.enabled = not w.playing
+        dock.pause_icon.enabled = w.playing
+        cfg = CONFIGS[w.config_name]
+        dock.time_l.text = f"{tint(WHITE, f'{t:.0f} s')} {faint(f'/ {spec.end_s:.0f}')}   {muted(f'{len(snap.vehicles) if snap else 0} vehicles')}"
+        if dock.open:
+            dock.scenario_l.text = f"{spec.condition} · {spec.density} traffic · seed {spec.seed}"
+            dock.config_l.text = f"{cfg.name}  {faint(cfg.distribution)}"
+            dock.highlight(SPEEDS.index(w.speed) if w.speed in SPEEDS else None)
+            dock.truth_b.color = (
+                rgba(CYAN, 0.3) if self.ground_truth else color.rgba(1, 1, 1, 0.045)
             )
-        )
-        self.hazard_label.color = rgba(RED) if active else rgba(MUTED)
-        if hud.left_open:
-            self.refresh_left(events)
-        if hud.right_open:
-            self.refresh_right(events)
+            dock.timeline(
+                t,
+                spec.end_s,
+                (spec.event_start_s, spec.event_end_s) if spec.event_occurred else None,
+                [e.t_s for e in events],
+            )
+            dock.timeline_l.text = faint(
+                f"event {spec.event_start_s:.0f}–{spec.event_end_s:.0f} s"
+                if spec.event_occurred
+                else "no real event in this scenario"
+            ) + faint(
+                f"   ·   {len(events)} reports, {sum(e.sent for e in events)} warnings   ·   {self._fps:.0f} fps"
+            )
         sel = self.selected
         if sel and sel[0] == "vehicle" and sel[1] in self.cars:
             car = self.cars[sel[1]]
             self.tag.enabled = True
             self.tag.text = sel[1]
-            self.tag.position = car.body.position + Vec3(0, 7, 0)
+            self.tag.position = car.body.position + Vec3(0, 6 * car.body.scale_y, 0)
         else:
             self.tag.enabled = False
+        active = snap is not None and snap.event_active
+        self.hazard_label.enabled = sel == ("hazard",)
+        self.hazard_label.text = spec.hazard_class.value.replace("_", " ").upper()
+        self.hazard_label.color = rgba(RED) if active else rgba(MUTED)
+        self.hazard_label.position = self.hazard_pos + Vec3(0, 30, 0)
+        if not hud.shown or sel is None:
+            hud.card.hide()
+        elif sel[0] == "vehicle":
+            self.vehicle_card(sel[1], events)
+        else:
+            self.hazard_card(events)
 
-    def refresh_left(self, events: list[WarningEvent]) -> None:
-        hud, spec = self.hud, self.worker.spec
-        h = spec.hazard
-        near = self.nearest_vehicles(len(hud.vehicle_buttons))
-        for i, b in enumerate(hud.vehicle_buttons):
-            if i >= len(near):
-                b.enabled = False
-                continue
-            v = near[i]
-            rgb, what = self.status_colour(v.vehicle_id)
-            b.enabled = True
-            b.text = f"{tint(rgb or WHITE, f'{v.vehicle_id:<14}')} {v.speed_mps * 3.6:4.0f} km/h {math.dist((v.x, v.y), (h.x, h.y)):5.0f} m  {muted(what)}"
-            b.on_click = lambda vid=v.vehicle_id: self.select(("vehicle", vid))
-            b.color = (
-                color.rgba(0, 0.45, 0.55, 0.9)
-                if self.selected == ("vehicle", v.vehicle_id)
-                else color.rgba(0.08, 0.11, 0.16, 0.92)
+    def vehicle_card(self, vid: str, events: list[WarningEvent]) -> None:
+        snap, spec = self.snap, self.worker.spec
+        v = (snap.vehicles.get(vid) or snap.blocking.get(vid)) if snap else None
+        if v is None or snap is None:
+            self.hud.card.show(
+                ("vehicle", vid),
+                faint(spaced("vehicle")),
+                vid,
+                muted("This vehicle has left the network."),
             )
-        active = self.snap is not None and self.snap.event_active
-        hud.hazard_button.text = (
-            f"{tint(RED if active else MUTED, spec.hazard_class.value.replace('_', ' '))}  {muted(spec.effect.replace('_', ' '))}  "
-            + (tint(RED, "ACTIVE") if active else muted("inactive"))
+            return
+        rgb, what = self.status_colour(vid)
+        role = (
+            "hazard vehicle, blocking a lane"
+            if vid in snap.blocking
+            else "reporter"
+            if vid in self.reporters
+            else "vehicle"
         )
-        lines = []
-        for e in events[-6:]:
-            r = e.result
-            status = {
-                "corroborated": tint(GREEN, "corroborated"),
-                "unverified": tint(AMBER, "unverified"),
-                "suppressed": tint(MUTED, "suppressed"),
-            }[r.assessed.status]
-            lines.append(
-                f"{e.t_s:4.0f}s {e.slot.role:<13} {status}  {muted(f'{len(e.delivered)} warned')}"
-            )
-        hud.log.text = "\n".join(lines) or muted(
-            "No report yet. The first one fires after\nits reporter passes the hazard. Press K to skip."
-        )
-
-    def refresh_right(self, events: list[WarningEvent]) -> None:
-        hud, snap, spec = self.hud, self.snap, self.worker.spec
-        sel = self.selected
-        out: list[str] = []
-        focus: WarningEvent | None = events[-1] if events else None
-        if sel and sel[0] == "vehicle" and snap is not None:
-            vid = sel[1]
-            v = snap.vehicles.get(vid) or snap.blocking.get(vid)
-            if v is None:
-                out.append(muted(f"{vid} has left the network."))
-            else:
-                rgb, what = self.status_colour(vid)
-                role = (
-                    "hazard vehicle (blocking a lane)"
-                    if vid in snap.blocking
-                    else "reporter"
-                    if vid in self.reporters
-                    else "vehicle"
+        height = self.world.elevation(v.edge_id, v.lane_pos_m)
+        lines = [
+            f"{muted('speed')}  {v.speed_mps * 3.6:.0f} km/h      {muted('heading')}  {v.heading_deg:.0f}° {cardinal(v.heading_deg)}",
+            f"{muted('road')}  {v.edge_id}"
+            + (muted(f"   ·   on a flyover, {height:.0f} m up") if height > 1 else ""),
+            f"{muted('to hazard')}  {math.dist((v.x, v.y), (spec.hazard.x, spec.hazard.y)):.0f} m in a straight line",
+            f"{muted('ground truth')}  "
+            + (tint(RED, "will reach the hazard") if vid in snap.relevant else "will not reach it"),
+        ]
+        mine = [e for e in events if e.result.warning and vid in e.result.warning.recipients]
+        if mine:
+            e = mine[-1]
+            got = e.delivered.get(vid)
+            if got is not None and e.outcome is not None:
+                relay = e.outcome.relays.get(vid, ORIGIN)
+                lines.append(
+                    tint(
+                        rgb or CYAN,
+                        f"warned in {got:.1f} ms, hop {e.outcome.hops.get(vid, '?')}, relayed by {relay}",
+                    )
                 )
-                height = self.world.elevation(v.edge_id, v.lane_pos_m)
-                out += [
-                    tint(CYAN, "SELECTED VEHICLE"),
-                    f"{tint(WHITE, vid)}   {muted(role)}",
-                    f"{muted('speed')} {v.speed_mps * 3.6:.0f} km/h   {muted('heading')} {v.heading_deg:.0f}° {cardinal(v.heading_deg)}",
-                    f"{muted('road')} {v.edge_id}"
-                    + (muted(f"   on flyover, {height:.0f} m up") if height > 1 else ""),
-                    f"{muted('to hazard')} {math.dist((v.x, v.y), (spec.hazard.x, spec.hazard.y)):.0f} m straight line",
-                    f"{muted('ground truth')} "
-                    + (
-                        tint(RED, "will reach the hazard")
-                        if vid in snap.relevant
-                        else "will not reach it"
+            else:
+                lines.append(tint(ORANGE, "addressed, but the radio never got it through"))
+        elif what:
+            lines.append(tint(rgb or MUTED, what))
+        else:
+            lines.append(faint("not addressed by any warning yet"))
+        following = self.rig.follow is not None and self.rig.follow is self.cars[vid].body
+        self.hud.card.show(
+            ("vehicle", vid),
+            tint(rgb or MUTED, spaced(role)),
+            vid,
+            "\n".join(lines),
+            actions=[("Stop following" if following else "Follow", self.toggle_follow)],
+        )
+
+    def hazard_card(self, events: list[WarningEvent]) -> None:
+        snap, spec = self.snap, self.worker.spec
+        active = snap is not None and snap.event_active
+        tab = self.hazard_tab
+        if tab == "report" and not events:
+            tab = "details"
+
+        def go(t: str):  # type: ignore[no-untyped-def]
+            def f() -> None:
+                self.hazard_tab = t
+                self._hud_at = 0
+
+            return f
+
+        tabs = [
+            ("Details", go("details"), tab == "details"),
+            ("Nearby", go("nearby"), tab == "nearby"),
+        ]
+        if events:
+            tabs.insert(1, ("Report", go("report"), tab == "report"))
+        items: list[tuple[str, object, bool]] = []
+        if tab == "details":
+            when = (
+                (
+                    f"{spec.event_start_s:.0f}–{spec.event_end_s:.0f} s   "
+                    + (tint(RED, "on the road now") if active else muted("not on the road now"))
+                )
+                if spec.event_occurred
+                else tint(BLUE, "never happened: the reports in this scenario are misleading")
+            )
+            body = "\n".join(
+                [
+                    f"{muted('effect')}  {spec.effect.replace('_', ' ')}",
+                    f"{muted('at')}  {(', '.join(spec.landmark_names[:2]) or spec.landmark_kind)[:48]}",
+                    f"{muted('OSM')}  {spec.landmark_id}   {muted('edge')}  {spec.hazard.edge_id} @ {spec.hazard.pos_m:.0f} m",
+                    f"{muted('event')}  {when}",
+                    f"{muted('sensors flagging within 200 m')}  {snap.sensor_flags if snap else 0}",
+                    (
+                        f"{muted('vehicles that will reach it')}  {len(snap.relevant) if snap else 0}"
+                        if spec.event_occurred
+                        else muted("nobody needs a warning")
                     ),
                 ]
-                mine = [
-                    e for e in events if e.result.warning and vid in e.result.warning.recipients
-                ]
-                if mine:
-                    e = mine[-1]
-                    focus = e
-                    got = e.delivered.get(vid)
-                    if got is not None and e.outcome is not None:
-                        relay = e.outcome.relays.get(vid, ORIGIN)
-                        out.append(
-                            tint(
-                                rgb or CYAN,
-                                f"warned in {got:.1f} ms, hop {e.outcome.hops.get(vid, '?')}, relayed by {relay}",
-                            )
-                        )
-                    else:
-                        out.append(tint(ORANGE, "addressed, but the radio never got it through"))
-                elif what:
-                    out.append(tint(rgb or MUTED, what))
-                else:
-                    out.append(muted("not addressed by any warning"))
+            )
+        elif tab == "report":
+            body = self.comm_text(events[-1])
         else:
-            active = snap is not None and snap.event_active
-            out += [
-                tint(RED, "HAZARD") + muted("   (scenario ground truth)"),
-                f"{tint(WHITE, spec.hazard_class.value.replace('_', ' '))}   {muted(spec.effect.replace('_', ' '))}",
-                f"{muted('at')} {(', '.join(spec.landmark_names[:2]) or spec.landmark_kind)[:52]}",
-                f"{muted('OSM')} {spec.landmark_id}   {muted('edge')} {spec.hazard.edge_id} @ {spec.hazard.pos_m:.0f} m",
-                f"{muted('event')} "
-                + (
-                    f"{spec.event_start_s:.0f}-{spec.event_end_s:.0f} s  "
-                    + (tint(RED, "on the road now") if active else muted("not on the road now"))
-                    if spec.event_occurred
-                    else tint(BLUE, "never happened: these reports are misleading")
-                ),
-                f"{muted('sensor flags within 200 m')} {snap.sensor_flags if snap else 0}   "
-                + (
-                    f"{muted('will reach it')} {len(snap.relevant) if snap else 0}"
-                    if spec.event_occurred
-                    else muted("nobody needs a warning")
-                ),
-            ]
-        hud.detail.text = "\n".join(out)
-        hud.comm.text = self.comm_text(focus)
+            near = self.nearest_vehicles(6)
+            h = spec.hazard
+            body = (
+                muted("Closest to the hazard now:")
+                if near
+                else muted("No vehicles yet. Press space to play.")
+            )
+            for v in near:
+                rgb, what = self.status_colour(v.vehicle_id)
+                text = f"{tint(rgb or WHITE, v.vehicle_id)}   {muted(f'{v.speed_mps * 3.6:.0f} km/h · {math.dist((v.x, v.y), (h.x, h.y)):.0f} m')}   {faint(what)}"
+                items.append((text, lambda vid=v.vehicle_id: self.select(("vehicle", vid)), False))
+        actions = []
+        if (
+            snap is not None
+            and spec.event_occurred
+            and snap.t_s < spec.event_start_s + 30
+            and not events
+        ):
+            actions.append(("Jump to the event", self.skip))
+        actions.append(("Fly here", lambda: self.rig.fly_to(self.hazard_pos, 300, 34)))
+        name = spec.hazard_class.value.replace("_", " ")
+        self.hud.card.show(
+            ("hazard", tab),
+            tint(RED if active else MUTED, spaced("hazard"))
+            + faint("   ·   scenario ground truth"),
+            name[:1].upper() + name[1:],
+            body,
+            tabs=tabs,
+            actions=actions,
+            items=items,  # type: ignore[arg-type]
+        )
 
-    def comm_text(self, e: WarningEvent | None) -> str:
-        if e is None:
-            return tint(CYAN, "COMMUNICATION") + "\n" + muted("Waiting for the first report.")
+    def skip(self) -> None:
+        spec = self.worker.spec
+        self.worker.send("until", max(0.0, spec.event_start_s + 30))
+        self.worker.send("play")
+
+    def comm_text(self, e: WarningEvent) -> str:
         r = e.result
         i = r.interpretation
         a = r.assessed
@@ -766,54 +1012,74 @@ class SimView(Entity):
             "no location"
             if loc is None
             else (
-                "approximate (reporter's position)"
+                "approximate (the reporter's position)"
                 if loc.approx
                 else f"edge {loc.edge_id} @ {loc.pos_m:.0f} m"
             )
         )
         cfg = CONFIGS[r.config_name]
+        status = {
+            "corroborated": tint(GREEN, "corroborated"),
+            "unverified": tint(AMBER, "unverified"),
+            "suppressed": tint(MUTED, "suppressed"),
+        }[a.status]
         lines = [
-            tint(CYAN, "COMMUNICATION")
-            + muted(f"   report at {e.t_s:.0f} s · {e.slot.role} · {e.text_source} text"),
-            *(f'"{line}"' if i == 0 else line for i, line in enumerate(wrap(e.text, 58))),
-            f"{muted('NLP')} {i.hazard.value} p={i.p_class:.2f}"
+            faint(f"{e.slot.role} report at {e.t_s:.0f} s  ·  {e.text_source} text"),
+            *(tint(WHITE, line) for line in wrap(f'"{e.text}"', 50)),
+            f"{muted('read as')}  {i.hazard.value.replace('_', ' ')}  p={i.p_class:.2f}"
             + (tint(AMBER, "  negated") if i.negated else "")
             + (tint(AMBER, "  hedged") if i.hedged else "")
-            + (f"  {muted('place')} {i.location_text}" if i.location_text else ""),
-            f"{muted('located')} {where}",
-            f"{muted('confidence')} {a.interp_conf:.2f}  {muted('evidence')} {a.event_evidence:.2f}  {muted('reports')} {a.n_reports}  -> "
-            + {
-                "corroborated": tint(GREEN, "corroborated"),
-                "unverified": tint(AMBER, "unverified"),
-                "suppressed": tint(MUTED, "suppressed"),
-            }[a.status],
+            + (f"   {muted('place')}  {i.location_text}" if i.location_text else ""),
+            f"{muted('located')}  {where}",
+            f"{muted('confidence')}  {a.interp_conf:.2f}   {muted('evidence')}  {a.event_evidence:.2f}   {muted('reports')}  {a.n_reports}   {status}",
         ]
         if r.warning is None:
             lines.append(muted("No warning sent."))
         else:
             o = e.outcome
             lines += [
-                *(tint(WHITE, line) for line in wrap(f'"{r.warning.text}"', 58)),
-                f"{muted('policy')} {cfg.distribution} {cfg.radius_m:.0f} m   {muted('addressed')} {len(r.warning.recipients)}",
-                f"{tint(CYAN, f'delivered {len(e.delivered)}')}   {tint(RED, f'missed {len(e.missed)}')}   {tint(BLUE, f'unneeded {len(e.unneeded)}')}",
-                muted(
+                *(tint(CYAN, line) for line in wrap(f'"{r.warning.text}"', 50)),
+                f"{muted('policy')}  {cfg.distribution}, {cfg.radius_m:.0f} m   {muted('addressed')}  {len(r.warning.recipients)}",
+                f"{tint(CYAN, f'{len(e.delivered)} delivered')}   {tint(RED, f'{len(e.missed)} missed')}   {tint(BLUE, f'{len(e.unneeded)} not needed')}",
+                faint(
                     f"{o.transmissions if o else 0} transmissions, {o.receptions if o else 0} receptions (Nakagami-m, multi-hop)"
                 ),
             ]
         if e.false_alarm:
             lines.append(
                 tint(
-                    RED, f"False alarm: no real event, all {len(e.delivered)} deliveries unneeded."
+                    RED,
+                    f"False alarm: no real event, so all {len(e.delivered)} deliveries were unneeded.",
                 )
             )
         if e.text_source == "fixture":
             lines.append(
-                tint(AMBER, "Fixture text: a code-path demo until P1's real reports exist.")
+                tint(AMBER, "Fixture text: a code-path demo until P1's\nreal reports exist.")
             )
         return "\n".join(lines)
 
 
 # --- app ---------------------------------------------------------------------------------------
+
+
+def bloom(app: Ursina) -> bool:
+    """Soft glow around lights; skipped quietly where the GPU cannot do it."""
+    try:
+        from direct.filter.CommonFilters import CommonFilters
+
+        filters = CommonFilters(app.win, app.cam)
+        ok = filters.setBloom(
+            blend=(0.3, 0.4, 0.3, 0.0),
+            mintrigger=0.45,
+            maxtrigger=1.0,
+            desat=-0.3,
+            intensity=1.6,
+            size="medium",
+        )
+        app._v2v_filters = filters  # type: ignore[attr-defined]  # keep it alive
+        return bool(ok)
+    except Exception:
+        return False
 
 
 def main() -> None:
@@ -823,17 +1089,25 @@ def main() -> None:
         "--config", choices=CONFIG_NAMES, default="proposed", help="experiment config to start with"
     )
     parser.add_argument(
-        "--distance", type=float, help="with --screenshot: camera distance in metres"
+        "--no-bloom", action="store_true", help="skip the glow filter (slower GPUs)"
     )
     parser.add_argument(
         "--screenshot", type=Path, help="save one frame and quit (for docs and checks)"
     )
+    parser.add_argument("--chapter", type=float, help="with --screenshot: tour position to hold")
     parser.add_argument(
         "--at", type=float, default=0.0, help="with --screenshot: simulated second to show"
     )
     parser.add_argument(
-        "--wait", type=float, default=4.0, help="with --screenshot: real seconds of play first"
+        "--wait", type=float, default=5.0, help="with --screenshot: real seconds of play first"
     )
+    parser.add_argument(
+        "--select", help="with --screenshot: 'hazard' or a vehicle id to open its card"
+    )
+    parser.add_argument(
+        "--tab", default="details", help="with --screenshot --select hazard: card tab"
+    )
+    parser.add_argument("--dock", action="store_true", help="with --screenshot: open the controls")
     parser.add_argument(
         "--follow", action="store_true", help="with --screenshot: chase-camera view"
     )
@@ -848,19 +1122,18 @@ def main() -> None:
         sys.exit(
             f"No scenarios in {SCENARIO_DIR}. Generate them first:\n  python -m v2v.sim.scenarios --corridor hebbal"
         )
-    app = Ursina(
-        title="A.C.T.I.O.N V2V · 3D simulation",
-        borderless=False,
-        development_mode=False,
-        vsync=True,
-    )
+    from panda3d.core import AntialiasAttrib, loadPrcFileData
+
+    loadPrcFileData("", "framebuffer-multisample 1")
+    loadPrcFileData("", "multisamples 4")
+    app = Ursina(title="A.C.T.I.O.N V2V", borderless=False, development_mode=False, vsync=True)
     window.color = SKY
     window.exit_button.enabled = False
     window.fps_counter.enabled = False
     window.entity_counter.enabled = False
     window.collider_counter.enabled = False
-    scene.fog_color = SKY
-    scene.fog_density = (900, 3200)
+    scene.setShaderInput("fog_color", Vec3(*HORIZON))
+    scene.setShaderInput("fog_range", FOG_RANGE)
 
     world = build_scene(
         NET_DIR / f"{CORRIDOR.name}.net.xml",
@@ -869,14 +1142,26 @@ def main() -> None:
     )
     xmin, ymin, xmax, ymax = world.bounds
     origin = ((xmin + xmax) / 2, (ymin + ymax) / 2)
-    city = build_city(world, origin)
+    sky = Entity(model=sky_dome(), shader=unlit_shader)
+    sky.setBin("background", 0)
+    sky.setDepthWrite(False)
+    translucent(sky).setBin("background", 0)
+    Entity(
+        model=hills(max(xmax - xmin, ymax - ymin) * 0.95, max(xmax - xmin, ymax - ymin) * 1.45),
+        shader=fog_shader,
+        double_sided=True,
+    )
+    city, windows = build_city(world, origin)
     roads, glow = build_roads(world, origin)
     decor, lamp_glow = build_decor(world, origin)
     city.entities()
     roads.entities()
     decor.entities()
-    glow.entities()
-    lamp_glow.entities(see_through=True)
+    for e in [*windows.entities(), *glow.entities(), *lamp_glow.entities()]:
+        additive(e)
+    scene.setAntialias(AntialiasAttrib.M_multisample)
+    if not args.no_bloom:
+        bloom(app)
 
     names = [Path(s.sumocfg).parent.name for s in specs]
     worker = SimWorker(
@@ -885,8 +1170,14 @@ def main() -> None:
         config_name=args.config,
     )
     worker.start()
-    rig = CameraRig()
+    rig = CameraRig([Shot((0.0, 0.0, 0.0), 200.0, 24.0, 3000.0, 38.0)])
 
+    class Sky(Entity):
+        def update(self) -> None:  # the sky stays centred on the viewer
+            p = camera.world_position
+            sky.position = (p.x, 0, p.z)
+
+    Sky()
     view: SimView
 
     def run(cmd: str, arg: object = None) -> None:
@@ -896,32 +1187,44 @@ def main() -> None:
         worker.send(cmd, arg)
         if cmd == "scenario":
             worker.index = int(arg) % len(specs)  # type: ignore[call-overload]
+        elif cmd == "config":
+            worker.config_name = str(arg)
         view.load_scenario()
+
+    def cycle_config(step: int) -> None:
+        switch(
+            "config",
+            CONFIG_NAMES[(CONFIG_NAMES.index(worker.config_name) + step) % len(CONFIG_NAMES)],
+        )
+
+    def toggle_truth() -> None:
+        view.ground_truth = not view.ground_truth
+        view._hud_at = 0
 
     actions = {
         "play": lambda: run("pause" if worker.playing else "play"),
         "step": lambda: run("step"),
         "reset": lambda: switch("reset", None),
+        "skip": lambda: view.skip(),
+        "truth": toggle_truth,
         "speed": lambda s: run("speed", s),
         "prev_scenario": lambda: switch("scenario", worker.index - 1),
         "next_scenario": lambda: switch("scenario", worker.index + 1),
-        "prev_config": lambda: switch(
-            "config", CONFIG_NAMES[(CONFIG_NAMES.index(worker.config_name) - 1) % len(CONFIG_NAMES)]
+        "prev_config": lambda: cycle_config(-1),
+        "next_config": lambda: cycle_config(1),
+        "dock": lambda: (hud.dock.set_open(not hud.dock.open), setattr(view, "_hud_at", 0)),
+        "mode": lambda: rig.tour() if rig.mode == "explore" else rig.explore(),
+        "chapter": lambda i: (
+            rig.tour(),
+            rig.scroll.go(i),
+            setattr(rig, "scrolled_at", time.perf_counter()),
         ),
-        "next_config": lambda: switch(
-            "config", CONFIG_NAMES[(CONFIG_NAMES.index(worker.config_name) + 1) % len(CONFIG_NAMES)]
-        ),
-        "follow": lambda: view.toggle_follow(),
-        "panels": lambda: hud.set_open(not hud.left_open, not hud.left_open),
-        "toggle_left": lambda: hud.set_open(left=not hud.left_open),
-        "toggle_right": lambda: hud.set_open(right=not hud.right_open),
-        "select_hazard": lambda: (
-            view.select(("hazard",)),
-            rig.look_at_point(view.hazard_pos, 420),
-        ),
+        "deselect": lambda: view.select(None),
     }
-    hud = Hud(actions, SPEEDS)  # type: ignore[arg-type]
+    hud = Hud(actions, SPEEDS, 6)
     view = SimView(worker, world, origin, hud, rig)
+    rig.pose = rig.free = rig.shots[0]
+    rig.on_mode = lambda: setattr(view, "_hud_at", 0)
     run("speed", 4.0)
 
     class Keys(Entity):
@@ -933,20 +1236,26 @@ def main() -> None:
             elif key == "r":
                 actions["reset"]()
             elif key == "f":
-                actions["follow"]()
+                view.toggle_follow()
             elif key == "g":
-                view.ground_truth = not view.ground_truth
+                toggle_truth()
             elif key == "k":
-                spec = worker.spec
-                run("until", max(0.0, spec.event_start_s + 30))
+                view.skip()
+            elif key == "c":
+                actions["dock"]()
+            elif key == "t":
+                rig.tour()
             elif key == "tab":
-                actions["panels"]()
+                hud.set_shown(not hud.shown)
             elif key in "1234567" and len(key) == 1:
                 run("speed", SPEEDS[int(key) - 1])
             elif key == "[":
                 actions["prev_scenario"]()
             elif key == "]":
                 actions["next_scenario"]()
+            elif key in ("down arrow", "page down", "up arrow", "page up"):
+                step = 1 if key in ("down arrow", "page down") else -1
+                actions["chapter"](round(rig.scroll.target) + step)
             elif key == "escape":
                 view.select(None)
             elif key == "f11":
@@ -960,6 +1269,15 @@ def main() -> None:
         if args.at:
             run("until", args.at)
         run("play")
+        if args.chapter is not None:
+            rig.scroll.value = rig.scroll.target = args.chapter
+            rig.pose = pose_at(rig.shots, args.chapter)
+            rig.scrolled_at = math.inf  # hold it there
+        if args.select:
+            view.select(("hazard",) if args.select == "hazard" else ("vehicle", args.select))
+            view.hazard_tab = args.tab
+        if args.dock:
+            hud.dock.set_open(True)
 
         class Director(Entity):
             """Screenshot mode: wait (for a report, if asked), frame the shot, save, quit."""
@@ -974,6 +1292,10 @@ def main() -> None:
 
             def update(self) -> None:
                 now = time.perf_counter()
+                if args.select and args.select != "hazard" and view.selected is None:
+                    view.select(("vehicle", args.select))
+                if args.select == "hazard":
+                    view.hazard_tab = args.tab
                 if self.shoot_at is None:
                     if any(e.sent for e in worker.events()):
                         run("speed", 1.0)
@@ -983,8 +1305,6 @@ def main() -> None:
                     return
                 if args.follow and self.shoot_at - now > 1.5 and view.rig.follow is None:
                     view.toggle_follow()
-                if args.distance:
-                    view.rig.dist = args.distance
                 if now >= self.shoot_at and not self.saved:
                     self.saved = True
                     args.screenshot.parent.mkdir(parents=True, exist_ok=True)
