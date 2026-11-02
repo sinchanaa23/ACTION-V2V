@@ -53,3 +53,9 @@ def test_hazard_words_are_not_place_names() -> None:
     assert extract_location("accident road pe") is None
     assert extract_location("reached office on time") is None
     assert extract_location("going to brigade road market") == "brigade road market"
+
+
+def test_names_stop_at_punctuation_hedges_and_other_places() -> None:
+    assert extract_location("shayad flyover ke paas gaddha hai") == "flyover"
+    assert find_locations("oil spill near the petrol pump, road is slippery") == ["petrol pump"]
+    assert extract_location("jam at silk board junction") == "silk board junction"
