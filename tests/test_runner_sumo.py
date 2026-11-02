@@ -7,6 +7,7 @@ code paths, never results.
 
 import importlib.util
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -19,10 +20,13 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def noisy_spec(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    from v2v.sim.osm_network import CORRIDORS
+    from v2v.sim.osm_network import CORRIDORS, DEFAULT_OUT_DIR
     from v2v.sim.scenarios import generate
 
     out = tmp_path_factory.mktemp("sim") / "networks"
+    built = DEFAULT_OUT_DIR / "hebbal"
+    if (built / "hebbal.net.xml").exists():  # reuse a local build instead of re-downloading
+        shutil.copytree(built, out / "hebbal")
     (spec,) = generate(CORRIDORS["hebbal"], ["noisy"], ["low"], [0], out)
     return Path(spec.sumocfg).parent / "spec.json"
 
