@@ -123,3 +123,45 @@ def _as_records() -> list[classifier.LabelledReport]:
         classifier.LabelledReport(report_id=f"f{i}", text=t, source="fixture", hazard=h)
         for i, (t, h) in enumerate(_FIXTURE_ROWS)
     ]
+
+
+def test_load_split_reads_p1_gold_records(tmp_path: Path) -> None:
+    # P1's GoldRecord adds negated, hedged and location spans; they are ignored here.
+    split = tmp_path / "val"
+    split.mkdir()
+    row = {
+        "report_id": "f0",
+        "text": "accident hua hai bridge ke paas",
+        "source": "fixture",
+        "hazard": "accident",
+        "negated": False,
+        "hedged": False,
+        "locations": [{"start": 17, "end": 23, "text": "bridge"}],
+    }
+    (split / "reports.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    [record] = classifier.load_split(split, allowed_sources={"fixture"})
+    assert record.hazard is HazardType.ACCIDENT
+
+
+def test_test_split_needs_explicit_flag(tmp_path: Path) -> None:
+    split = _write_split(tmp_path / "splits" / "test")
+    assert classifier.load_split(split, allowed_sources={"fixture"}, allow_test=True)
+
+
+def test_write_predictions_matches_error_analysis_format(tmp_path: Path) -> None:
+    pytest.importorskip("sklearn")
+    model = classifier.TfidfHazardClassifier(seed=0)
+    model.fit([t for t, _ in _FIXTURE_ROWS], [h for _, h in _FIXTURE_ROWS])
+    out = tmp_path / "pred.jsonl"
+    classifier.write_predictions(model, _as_records(), out)
+    rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    assert [r["report_id"] for r in rows] == [f"f{i}" for i in range(len(_FIXTURE_ROWS))]
+    assert all(HazardType(r["hazard"]) in model.classes for r in rows)
+    assert all(0.0 < r["p_class"] <= 1.0 for r in rows)
+
+
+def test_predict_cli_refuses_test_split_without_flag(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="frozen test split"):
+        classifier.main(
+            ["predict", "--split", str(tmp_path / "splits" / "test"), "--out", "x.jsonl"]
+        )

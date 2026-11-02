@@ -1,6 +1,7 @@
 """Stage 2: NLP hazard interpretation. Owner: P2 (P2-01, P2-05).
 
     python -m v2v.nlp.classifier train --train data/splits/train --val data/splits/val
+    python -m v2v.nlp.classifier predict --split data/splits/val --out val_tfidf.jsonl
 
 Baseline B is TF-IDF (word 1-2 grams + character 2-5 grams, which absorb
 Hinglish spelling variants) with logistic regression. Its scores are
@@ -47,11 +48,12 @@ class LabelledReport(BaseModel):
 
 
 def load_split(
-    split_dir: Path, allowed_sources: Collection[str] = REAL_SOURCES
+    split_dir: Path, allowed_sources: Collection[str] = REAL_SOURCES, allow_test: bool = False
 ) -> list[LabelledReport]:
-    """Read every ``*.jsonl`` under ``split_dir``. Refuses the frozen test
-    split and any record whose source is not real."""
-    if "test" in split_dir.resolve().parts:
+    """Read every ``*.jsonl`` under ``split_dir`` (P1's ``reports.jsonl``).
+    Refuses any record whose source is not real, and the frozen test split
+    unless ``allow_test`` is set for the final, one-off RQ1 predictions."""
+    if not allow_test and "test" in split_dir.resolve().parts:
         raise ValueError(f"refusing to read the frozen test split: {split_dir}")
     records: list[LabelledReport] = []
     for path in sorted(split_dir.rglob("*.jsonl")):
@@ -229,6 +231,22 @@ def train(train_dir: Path, val_dir: Path, out: Path, seed: int = 0) -> dict[str,
     }
 
 
+def write_predictions(
+    model: TfidfHazardClassifier, records: Sequence[LabelledReport], out: Path
+) -> None:
+    """JSONL of ``report_id``, ``hazard`` and ``p_class``, the format P1's RQ1
+    error analysis (v2v.data.error_analysis --pred) reads."""
+    preds = model.predict([r.text for r in records])
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        "".join(
+            json.dumps({"report_id": r.report_id, "hazard": h.value, "p_class": round(p, 6)}) + "\n"
+            for r, (h, p) in zip(records, preds, strict=True)
+        ),
+        encoding="utf-8",
+    )
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -237,7 +255,21 @@ def main(argv: list[str] | None = None) -> None:
     t.add_argument("--val", type=Path, default=Path("data/splits/val"))
     t.add_argument("--out", type=Path, default=DEFAULT_MODEL_PATH)
     t.add_argument("--seed", type=int, default=0)
+    p = sub.add_parser("predict", help="write predictions for the RQ1 error analysis")
+    p.add_argument("--split", type=Path, required=True)
+    p.add_argument("--out", type=Path, required=True)
+    p.add_argument("--model", type=Path, default=DEFAULT_MODEL_PATH)
+    p.add_argument(
+        "--allow-test",
+        action="store_true",
+        help="final RQ1 run on the frozen test split only, after the model is frozen",
+    )
     args = parser.parse_args(argv)
+    if args.command == "predict":
+        records = load_split(args.split, allow_test=args.allow_test)
+        write_predictions(TfidfHazardClassifier.load(args.model), records, args.out)
+        print(f"wrote {len(records)} predictions to {args.out}")
+        return
     print(json.dumps(train(args.train, args.val, args.out, args.seed), indent=2))
 
 
