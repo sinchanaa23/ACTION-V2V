@@ -7,9 +7,12 @@
 Reads traces written by ``v2v.sim.recorder`` (``V2V_TRACES_DIR``, default
 ``sim_out/traces``). Pages: Overview, Live Simulation (map, telemetry,
 hazard, delivery, timeline and report-to-warning trace), Road Network,
-Reports, Policy Comparison and Settings. Report text, the NLP reading and the
-confidence verdict are shown as pending until P3's experiment runner records
-them; nothing here is placeholder data presented as results.
+Reports, Policy Comparison and Settings: the Overseer view, fleet-wide.
+Driver mode (``ui_driver``) is one demo vehicle's own dashboard on a live SUMO
+run; the two buttons at the top of the rail switch between them. Report text,
+the NLP reading and the confidence verdict are shown as pending until P3's
+experiment runner records them; nothing here is placeholder data presented as
+results.
 
 Map data (c) OpenStreetMap contributors, ODbL; basemap (c) CARTO.
 """
@@ -21,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))  # sibling ui_* modules
 
 import streamlit as st  # noqa: E402
 from ui_data import alerts, load, metrics, trace_files, traces_dir  # noqa: E402
+from ui_driver import page_driver  # noqa: E402
 from ui_pages import PAGES, init_prefs  # noqa: E402
 from ui_theme import BLUE, ORANGE, RED, TEXT, chip, html, inject_css, pct  # noqa: E402
 
@@ -33,11 +37,33 @@ def _go(page: str) -> None:
     st.session_state["page"] = page
 
 
+def _mode(mode: str) -> None:
+    st.session_state["mode"] = mode
+
+
 def rail() -> str:
-    """Slim icon navigation; the label shows as a tooltip."""
+    """Slim icon navigation; the label shows as a tooltip. The two buttons at
+    the top switch between Overseer (fleet-wide) and Driver mode."""
     page = st.session_state.setdefault("page", "live")
+    mode = st.session_state.setdefault("mode", "overseer")
     with st.sidebar, st.container(key="rail"):
         html('<div class="v2v-logo">V2V</div>')
+        for mid, name, icon in (
+            ("overseer", "Overseer mode: fleet-wide monitoring", ":material/monitoring:"),
+            ("driver", "Driver mode: one vehicle's dashboard", ":material/directions_car:"),
+        ):
+            st.button(
+                name,
+                icon=icon,
+                key=f"mode_{mid}",
+                help=name,
+                type="primary" if mid == mode else "secondary",
+                on_click=_mode,
+                args=(mid,),
+            )
+        html('<div style="height:1px;width:28px;background:rgba(255,255,255,0.1)"></div>')
+        if mode == "driver":
+            return "driver"
         for pid, (name, icon, _) in PAGES.items():
             if pid == "settings":
                 html('<div style="height:34vh"></div>')
@@ -135,6 +161,9 @@ def main() -> None:
     inject_css()
     init_prefs()
     page = rail()
+    if page == "driver":
+        page_driver()
+        return
     directory = traces_dir()
     traces = load(trace_files(directory)) if directory.is_dir() else {}
     if not traces:

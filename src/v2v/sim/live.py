@@ -18,6 +18,7 @@ from v2v.confidence.dedup import HazardTracker
 from v2v.contracts import DriverReport, ExperimentConfig, RunResult, VehicleState
 from v2v.eval.runner import DEMO_POOL, ReportPool
 from v2v.experiments import CONFIGS
+from v2v.geocast import directional
 from v2v.pipeline import process_report
 from v2v.sim.delivery import DEFAULT_MODEL, DeliveryModel, DeliveryOutcome
 from v2v.sim.scenarios import ReportSlot, ScenarioSpec
@@ -56,9 +57,10 @@ class WarningEvent:
     radius_m: float
     pulses: tuple[Pulse, ...] = ()
     zone_edges: dict[str, float] = field(default_factory=dict)
-    """Directional geocast on the road map: upstream edge -> metres from its end
-    to the hazard (plus the hazard's own edge at 0). Empty for circular and
-    broadcast, and when the heading rule had to stand in."""
+    """Directional geocast on the road map: each covered edge -> metres of it
+    inside the zone (backward, forward or both carriageways, as the hazard
+    type decides). Empty for circular and broadcast, and when the heading
+    rule had to stand in."""
 
     @property
     def sent(self) -> bool:
@@ -232,9 +234,13 @@ class LiveSession:
             and location is not None
             and location.edge_id in graph.length_m
         ):
-            zone = {location.edge_id: 0.0} | graph.upstream(
-                location.edge_id, location.pos_m, self.config.radius_m
-            )
+            reach = directional.reach_for(result.assessed.hazard)
+            zone = {
+                edge: span[1] - span[0]
+                for edge, span in directional.road_zone(
+                    graph, location, self.config.radius_m, reach
+                ).items()
+            }
         return WarningEvent(
             t_s=world.time_s,
             t_pass_s=t_pass,

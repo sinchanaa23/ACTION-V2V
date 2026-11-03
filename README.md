@@ -47,6 +47,23 @@ R reset, F follow, G ground truth, 1-7 speed, [ ] scenario, Tab hide the interfa
 F11 full screen, `--no-bloom` on slower GPUs. Report text stays fixture text (labelled
 in the card) until P1's real test split exists.
 
+The web dashboard has two modes, switched with the two buttons at the top of its rail.
+**Overseer** is the fleet-wide view of recorded runs (live map, network, reports, policy
+comparison). **Driver** puts you in one of two demo vehicles, a car (Tata Nexon EV) on the
+approach to the hazard and a scooter (Ather 450X) on the opposite carriageway, added to a
+live SUMO run as real vehicles: a heading-up perspective navigation view of the real roads
+and buildings, the route ahead and the path travelled, speed and turn cues, traffic in
+sight, only the V2V messages that vehicle received (with where they are relative to it),
+and three driver alerts of its own, one per geocast direction.
+
+Directional geocast (`geocast/directional.py`) covers stretches of directed road (SUMO
+edges are one carriageway each) within the radius by driving distance: **backward**
+(traffic approaching the point on its carriageway: accident, obstruction, stopped or
+braking vehicle), **forward** (traffic ahead) or **bidirectional** (approaching on both
+carriageways: a slippery road, which the simulation then slows on both sides too).
+Relaying uses counter-based suppression (Ni et al. 1999), and a vehicle never receives the
+same warning twice.
+
 Configs: `baseline_a`, `baseline_b`, `proposed`, `ablation_direction`,
 `ablation_confidence`. Right now the pipeline runs on stubs and a toy two-way road
 (`src/v2v/sim/toy_world.py`); each stub is replaced by its owner's PR.
