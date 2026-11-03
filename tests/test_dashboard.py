@@ -211,3 +211,48 @@ def test_app_explains_when_there_are_no_traces(
     app = AppTest.from_file(APP, default_timeout=60).run()
     assert not app.exception
     assert "v2v.sim.recorder" in app.warning[0].value
+
+
+@needs_streamlit
+def test_overseer_and_driver_modes_switch_without_losing_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = _app(tmp_path, monkeypatch).run()
+    assert app.session_state["mode"] == "overseer"
+    app.button(key="nav_compare").click().run()
+    app.button(key="mode_driver").click().run()
+    assert not app.exception
+    text = " ".join(m.value for m in app.markdown) + " ".join(w.value for w in app.warning)
+    assert "Choose your vehicle" in text
+    assert not any(b.key and b.key.startswith("nav_") for b in app.button)  # fleet pages hidden
+    app.button(key="mode_overseer").click().run()
+    assert not app.exception
+    assert app.session_state["page"] == "compare"  # back where the overseer left off
+
+
+@needs_streamlit
+@pytest.mark.usefixtures("ui")
+def test_driver_view_helpers() -> None:
+    from ui_driver import turn_cue
+    from ui_nav import Camera, _path, relevance, where_text
+
+    from v2v.sim.driver import Bearing
+
+    cam = Camera(0.0, 0.0, 0.0, back_m=40.0, height_m=30.0)
+    near, far = cam.project(0.0, 10.0), cam.project(0.0, 500.0)
+    assert near is not None and far is not None
+    assert near[0] == pytest.approx(0.0)
+    assert near[1] < far[1] < 0  # farther is higher on screen, up to the horizon
+    assert cam.project(0.0, -60.0) is None  # behind the camera
+    right = cam.project(20.0, 10.0)
+    assert right is not None and right[0] > 0
+    east = Camera(0.0, 0.0, 90.0, 40.0, 30.0)
+    ahead = east.project(100.0, 0.0)
+    assert ahead is not None and ahead[0] == pytest.approx(0.0)  # heading up
+    assert _path([0.0, 1.0, None, 2.0, 3.0], [0.0, 1.0, None, 2.0, 3.0], close=True).count("Z") == 2
+    assert turn_cue(5)[1] == "Continue straight" and turn_cue(-40)[1] == "Bear left"
+    assert turn_cue(90)[1] == "Turn right"
+    on_route = Bearing(150.0, 2.0, 160.0)
+    assert where_text(on_route) == "160 m ahead on your route"
+    assert relevance(on_route)[1] == "on your route"
+    assert relevance(Bearing(300.0, 179.0, None))[1] == "passed"

@@ -132,7 +132,11 @@ class SumoWorld:
             *extra_args,
         ]  # fmt: skip
         # Direction-sensitive geocast works on the public road map of this network.
-        directional.use_road_graph(road_graph(net_file(Path(spec.sumocfg))))
+        graph = road_graph(net_file(Path(spec.sumocfg)))
+        directional.acquire_road_graph(self, graph)
+        self.opposite_point = self._opposite_point(graph)
+        """For a hazard on both carriageways: (edge, pos) level with it on the
+        other one. It is part of the event there too (slowed, and ground truth)."""
         traci.start(cmd, label=self._label)
         self._t: Any = traci.getConnection(self._label)
         self._tracked: dict[str, _Tracked] = {}
@@ -209,19 +213,29 @@ class SumoWorld:
         tracked = self._tracked.get(vehicle_id)
         if tracked is None or not tracked.values:
             return False
-        passed = passed_point(
-            tracked.route,
-            tracked.values[VAR_ROUTE_INDEX],
-            self._lane_pos(tracked),
-            location.edge_id,
-            location.pos_m,
+        points = [(location.edge_id, location.pos_m)]
+        hazard = self.spec.hazard
+        if self.opposite_point is not None and (location.edge_id, location.pos_m) == (
+            hazard.edge_id,
+            hazard.pos_m,
+        ):
+            points.append(self.opposite_point)  # the event covers both carriageways
+        return any(
+            passed_point(
+                tracked.route,
+                tracked.values[VAR_ROUTE_INDEX],
+                self._lane_pos(tracked),
+                edge,
+                pos,
+            )
+            is False
+            for edge, pos in points
         )
-        return passed is False
 
     def close(self) -> None:
         if not self._closed:
             self._t.close()
-            directional.use_road_graph(None)
+            directional.release_road_graph(self)
             self._closed = True
 
     # --- Beyond the protocol ----------------------------------------------------
@@ -238,6 +252,34 @@ class SumoWorld:
             for vid, tracked in self._tracked.items()
             if tracked.on_road and vid.startswith(HAZARD_PREFIX)
         ]
+
+    def add_vehicle(
+        self,
+        vehicle_id: str,
+        edges: Iterable[str],
+        type_id: str,
+        vclass: str,
+        length_m: float,
+        width_m: float,
+        max_speed_mps: float,
+        accel: float,
+        decel: float,
+    ) -> None:
+        """Insert one extra vehicle now (a demo vehicle): a real SUMO vehicle
+        of its own type, on a route of real edges, tracked like any other."""
+        t = self._t
+        if type_id not in t.vehicletype.getIDList():
+            t.vehicletype.copy("DEFAULT_VEHTYPE", type_id)
+            t.vehicletype.setVehicleClass(type_id, vclass)
+            t.vehicletype.setShapeClass(type_id, vclass)
+            t.vehicletype.setLength(type_id, length_m)
+            t.vehicletype.setWidth(type_id, width_m)
+            t.vehicletype.setMaxSpeed(type_id, max_speed_mps)
+            t.vehicletype.setAccel(type_id, accel)
+            t.vehicletype.setDecel(type_id, decel)
+        route_id = f"{vehicle_id}_route"
+        t.route.add(route_id, list(edges))
+        t.vehicle.add(vehicle_id, route_id, typeID=type_id, depart="now", departLane="best")
 
     def run_until(self, t: float) -> None:
         while self.time_s < t:
@@ -300,15 +342,21 @@ class SumoWorld:
                 self.hazard_passes[vid] = now
                 self.clock.mark_passed(vid, now)
 
+    def _opposite_point(self, graph: RoadGraph) -> tuple[str, float] | None:
+        spec = self.spec
+        if directional.reach_for(spec.hazard_class) != "bidirectional":
+            return None
+        return graph.opposite(spec.hazard.edge_id, spec.hazard.x, spec.hazard.y)
+
     def _apply_effects(self) -> None:
         spec = self.spec
         if spec.effect != "slow_zone" or not spec.event_occurred:
             return
         active = spec.event_start_s <= self.time_s < spec.event_end_s
-        lanes = [
-            f"{spec.hazard.edge_id}_{i}"
-            for i in range(self._t.edge.getLaneNumber(spec.hazard.edge_id))
-        ]
+        edges = [spec.hazard.edge_id]
+        if self.opposite_point is not None:
+            edges.append(self.opposite_point[0])
+        lanes = [f"{e}_{i}" for e in edges for i in range(self._t.edge.getLaneNumber(e))]
         if active and not self._slow_zone_saved:
             for lane in lanes:
                 self._slow_zone_saved[lane] = self._t.lane.getMaxSpeed(lane)
