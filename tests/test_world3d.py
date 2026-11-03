@@ -117,3 +117,36 @@ def test_slow_motion_and_angles(geom) -> None:  # type: ignore[no-untyped-def]
     assert geom.slow_motion(25.0) * 25.0 == pytest.approx(2.5)  # whole flood in 2.5 s
     assert geom.lerp_angle(350.0, 10.0, 0.5) == pytest.approx(0.0)  # the short way round
     assert geom.to_ursina(110.0, 220.0, 7.0, (100.0, 200.0)) == (10.0, 7.0, 20.0)
+
+
+def test_render_side_keeps_the_latest_snapshot_and_every_event(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The 3D view talks to SUMO in another process; its handle must keep only
+    the newest snapshot, every fired event, and the process's state."""
+    pytest.importorskip("sumolib")
+    import multiprocessing as mp
+
+    from tests.test_scenarios import _spec
+
+    monkeypatch.syspath_prepend(str(SIM3D))
+    import worker
+
+    try:
+        here, there = mp.Pipe()
+        w = worker.SimWorker([_spec(tmp_path)])
+        w._conn = here
+        for t in (1.0, 2.0):
+            snap = worker.Snapshot(t, {}, {}, frozenset(), 0, False, False)
+            there.send(("snap", snap))
+        there.send(("state", {"playing": True, "status": "running", "speed": 16.0, "error": None}))
+        version, snap = w.latest()
+        assert snap is not None and snap.t_s == 2.0 and version == 2
+        assert w.playing and w.status == "running" and w.speed == 16.0 and w.error is None
+        assert w.drain() == [] and w.events() == []
+        there.send(("reset", None))
+        there.close()
+        w.latest()
+        assert w.status == "error" and w.error  # the process went away: say so
+    finally:
+        sys.modules.pop("worker", None)

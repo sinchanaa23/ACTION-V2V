@@ -471,6 +471,7 @@ class SimView(Entity):
         )
         self._hud_at = 0.0
         self._fps = 60.0
+        self._slow_since: float | None = None
         self._build_hazard()
         self.load_scenario()
 
@@ -721,6 +722,7 @@ class SimView(Entity):
         dt = utime.dt
         now = time.perf_counter()
         self._fps = self._fps * 0.95 + (1 / max(dt, 1e-4)) * 0.05
+        self._guard_quality(now)
         version, snap = self.worker.latest()
         if version != self.version and snap is not None:
             self.version = version
@@ -763,6 +765,21 @@ class SimView(Entity):
         if now - self._hud_at > 0.2:
             self._hud_at = now
             self.refresh_hud()
+
+    def _guard_quality(self, now: float) -> None:
+        """If the frame rate stays low, drop the glow filter (the costliest effect)
+        rather than let the view crawl, e.g. on integrated graphics while recording."""
+        filters = getattr(base, "_v2v_filters", None)  # noqa: F821 - Panda3D's global
+        if filters is None:
+            return
+        if self._fps >= 22.0:
+            self._slow_since = None
+        elif self._slow_since is None:
+            self._slow_since = now
+        elif now - self._slow_since > 3.0:
+            filters.delBloom()
+            base._v2v_filters = None  # noqa: F821
+            self.toast(muted("Glow turned off to keep the view smooth on this GPU."), 5.0)
 
     def apply(self, snap: Snapshot) -> None:
         self.snap = snap
@@ -1092,6 +1109,9 @@ def main() -> None:
         "--no-bloom", action="store_true", help="skip the glow filter (slower GPUs)"
     )
     parser.add_argument(
+        "--speed", type=float, default=4.0, choices=SPEEDS, help="simulated seconds per second"
+    )
+    parser.add_argument(
         "--screenshot", type=Path, help="save one frame and quit (for docs and checks)"
     )
     parser.add_argument("--chapter", type=float, help="with --screenshot: tour position to hold")
@@ -1225,7 +1245,7 @@ def main() -> None:
     view = SimView(worker, world, origin, hud, rig)
     rig.pose = rig.free = rig.shots[0]
     rig.on_mode = lambda: setattr(view, "_hud_at", 0)
-    run("speed", 4.0)
+    run("speed", args.speed)
 
     class Keys(Entity):
         def input(self, key: str) -> None:

@@ -1,20 +1,27 @@
 # ruff: noqa: E501 - long geometry and HUD expressions
-"""Runs the live SUMO session on its own thread. Owner: P4.
+"""Runs the live SUMO session in its own process. Owner: P4.
 
-TraCI is only ever touched from this thread. The render loop sends commands
-(play, pause, step, reset, scenario, config, speed) and reads the latest
-snapshot, so a slow SUMO step never stalls a frame.
+TraCI and the pipeline run in a child process; the render loop sends commands
+(play, pause, step, reset, scenario, config, speed, until) and reads the
+latest snapshot. A separate process rather than a thread: a simulation thread
+that falls behind (high speed, a busy CPU) steps back to back in Python and
+takes the interpreter lock every time the renderer lets go of it, which
+starved the window down to a frame every few seconds.
 """
 
-import queue
-import threading
+import multiprocessing as mp
 import time
 import traceback
 from dataclasses import dataclass, field
+from multiprocessing.connection import Connection
+from typing import Any
 
 from v2v.contracts import VehicleState
 from v2v.sim.live import LiveSession, WarningEvent
 from v2v.sim.scenarios import ScenarioSpec
+
+MAX_BEHIND_S = 0.25
+"""Never try to catch up more than this: fall back to real time instead."""
 
 
 @dataclass(frozen=True)
@@ -36,8 +43,181 @@ class FiredEvent:
     """SUMO x/y of every vehicle at send time, for drawing the V2V hops."""
 
 
-@dataclass(eq=False)  # a Thread: keep identity hashing, avoid its private names
-class SimWorker(threading.Thread):
+# --- the child process ---------------------------------------------------------------
+
+
+@dataclass
+class _Sim:
+    conn: Connection
+    specs: list[ScenarioSpec]
+    index: int
+    config_name: str
+    speed: float
+    playing: bool = False
+    status: str = "starting SUMO"
+    session: LiveSession | None = None
+    pending: list[tuple[str, Any]] = field(default_factory=list)
+    """Commands that arrived during a fast-forward, applied once it is done."""
+
+    def state(self, error: str | None = None) -> None:
+        self.conn.send(
+            (
+                "state",
+                {
+                    "index": self.index,
+                    "config_name": self.config_name,
+                    "speed": self.speed,
+                    "playing": self.playing,
+                    "status": self.status,
+                    "error": error,
+                },
+            )
+        )
+
+    def load(self) -> None:
+        self.status = "starting SUMO"
+        self.state()
+        if self.session is not None:
+            self.session.close()
+        self.session = LiveSession(self.specs[self.index], config_name=self.config_name)
+        self.session.open()
+        self.playing = False
+        self.conn.send(("reset", None))
+        self.publish()
+        self.status = "ready"
+        self.state()
+
+    def step(self) -> None:
+        session = self.session
+        assert session is not None
+        new = session.advance()
+        if new:
+            positions = {v.vehicle_id: (v.x, v.y) for v in session.vehicles()}
+            for e in new:
+                positions.setdefault(e.slot.reporter_id, e.sender_xy)
+            self.conn.send(("fired", [FiredEvent(e, positions) for e in new]))
+        self.publish()
+
+    def publish(self) -> None:
+        session = self.session
+        assert session is not None
+        vehicles = {v.vehicle_id: v for v in session.vehicles()}
+        self.conn.send(
+            (
+                "snap",
+                Snapshot(
+                    t_s=session.time_s,
+                    vehicles=vehicles,
+                    blocking={v.vehicle_id: v for v in session.blocking()},
+                    # Nobody needs a warning about an event that never happened.
+                    relevant=frozenset(session.will_reach(vehicles))
+                    if session.spec.event_occurred
+                    else frozenset(),
+                    sensor_flags=session.world.sensor_flags(session.spec.hazard, 200.0),
+                    event_active=session.event_active,
+                    finished=session.finished,
+                ),
+            )
+        )
+
+    def command(self, cmd: str, arg: Any) -> bool:
+        """Apply one command; False to quit."""
+        session = self.session
+        assert session is not None
+        if cmd == "quit":
+            return False
+        if cmd == "play":
+            self.playing, self.status = True, "running"
+        elif cmd == "pause":
+            self.playing, self.status = False, "paused"
+        elif cmd == "step":
+            self.playing, self.status = False, "paused"
+            self.step()
+        elif cmd == "until":  # fast-forward to a simulated time, showing progress
+            self.status = "fast-forward"
+            self.state()
+            last = time.perf_counter()
+            while session.time_s < float(arg) and not session.finished:
+                new = session.advance()
+                if new:
+                    positions = {v.vehicle_id: (v.x, v.y) for v in session.vehicles()}
+                    for e in new:
+                        positions.setdefault(e.slot.reporter_id, e.sender_xy)
+                    self.conn.send(("fired", [FiredEvent(e, positions) for e in new]))
+                if time.perf_counter() - last > 0.25:
+                    last = time.perf_counter()
+                    self.publish()
+                while self.conn.poll():
+                    later = self.conn.recv()
+                    if later[0] == "quit":
+                        return False
+                    self.pending.append(later)  # play, speed... after the skip
+            self.publish()
+            self.status = "running" if self.playing else "paused"
+        elif cmd == "speed":
+            self.speed = float(arg)
+        elif cmd == "reset":
+            self.load()
+        elif cmd == "scenario":
+            self.index = int(arg) % len(self.specs)
+            self.load()
+        elif cmd == "config":
+            self.config_name = str(arg)
+            self.load()
+        self.state()
+        return True
+
+    def run(self) -> None:
+        self.load()
+        next_step = time.perf_counter()
+        while True:
+            while self.pending or self.conn.poll():
+                cmd, arg = self.pending.pop(0) if self.pending else self.conn.recv()
+                if not self.command(cmd, arg):
+                    return
+                next_step = time.perf_counter()
+            session = self.session
+            assert session is not None
+            if self.playing and not session.finished:
+                now = time.perf_counter()
+                if now >= next_step:
+                    self.step()
+                    next_step = max(next_step + 1.0 / self.speed, now - MAX_BEHIND_S)
+                else:
+                    self.conn.poll(min(0.01, next_step - now))
+            else:
+                if session.finished and self.playing:
+                    self.playing, self.status = False, "finished"
+                    self.state()
+                self.conn.poll(0.05)
+
+
+def _serve(
+    conn: Connection, specs: list[ScenarioSpec], index: int, config_name: str, speed: float
+) -> None:
+    sim = _Sim(conn, specs, index, config_name, speed)
+    try:
+        sim.run()
+    except (EOFError, BrokenPipeError, ConnectionError):
+        pass  # the window closed
+    except Exception:  # surface SUMO failures in the HUD instead of dying silently
+        try:
+            sim.status = "error"
+            sim.state(traceback.format_exc(limit=3))
+        except OSError:
+            pass
+    finally:
+        if sim.session is not None:
+            sim.session.close()
+
+
+# --- the render side -------------------------------------------------------------------
+
+
+@dataclass(eq=False)
+class SimWorker:
+    """The render side's handle on the simulation process."""
+
     specs: list[ScenarioSpec]
     index: int = 0
     config_name: str = "proposed"
@@ -46,151 +226,82 @@ class SimWorker(threading.Thread):
     playing: bool = False
     status: str = "starting SUMO"
     error: str | None = None
-    _cmds: "queue.Queue[tuple[str, object]]" = field(default_factory=queue.Queue)
-    _lock: threading.Lock = field(default_factory=threading.Lock)
+    _conn: Connection | None = None
+    _proc: Any = None
     _snapshot: Snapshot | None = None
     _version: int = 0
     _fired: list[FiredEvent] = field(default_factory=list)
-    _session: LiveSession | None = None
-    _halt: threading.Event = field(default_factory=threading.Event)
-
-    def __post_init__(self) -> None:
-        threading.Thread.__init__(self, daemon=True, name="sumo")
-
-    # --- render-thread API -----------------------------------------------------
+    _events: list[WarningEvent] = field(default_factory=list)
 
     @property
     def spec(self) -> ScenarioSpec:
         return self.specs[self.index]
 
-    def send(self, cmd: str, arg: object = None) -> None:
-        self._cmds.put((cmd, arg))
-
-    def latest(self) -> tuple[int, Snapshot | None]:
-        with self._lock:
-            return self._version, self._snapshot
-
-    def drain(self) -> list[FiredEvent]:
-        with self._lock:
-            out, self._fired = self._fired, []
-            return out
-
-    def events(self) -> list[WarningEvent]:
-        with self._lock:
-            return list(self._session.events) if self._session else []
+    def start(self) -> None:
+        ctx = mp.get_context("spawn")
+        here, there = ctx.Pipe()
+        self._conn = here
+        self._proc = ctx.Process(
+            target=_serve,
+            args=(there, self.specs, self.index, self.config_name, self.speed),
+            daemon=True,
+            name="sumo",
+        )
+        self._proc.start()
+        there.close()
 
     def stop(self) -> None:
-        self._halt.set()
-
-    # --- thread ------------------------------------------------------------------
-
-    def run(self) -> None:
-        try:
-            self._load()
-            next_step = time.perf_counter()
-            while not self._halt.is_set():
-                stepped = self._commands()
-                session = self._session
-                assert session is not None
-                if self.playing and not session.finished:
-                    now = time.perf_counter()
-                    if now >= next_step:
-                        self._step()
-                        next_step = max(next_step + 1.0 / self.speed, now - 0.25)
-                    else:
-                        time.sleep(min(0.004, next_step - now))
-                else:
-                    if session.finished:
-                        self.playing = False
-                        self.status = "finished"
-                    next_step = time.perf_counter()
-                    if not stepped:
-                        time.sleep(0.01)
-        except Exception:  # surface SUMO failures in the HUD instead of dying silently
-            self.error = traceback.format_exc(limit=3)
-            self.status = "error"
-        finally:
-            if self._session is not None:
-                self._session.close()
-
-    def _commands(self) -> bool:
-        stepped = False
-        while True:
+        if self._conn is not None:
             try:
-                cmd, arg = self._cmds.get_nowait()
-            except queue.Empty:
-                return stepped
-            if cmd == "play":
-                self.playing = True
-                self.status = "running"
-            elif cmd == "pause":
-                self.playing = False
-                self.status = "paused"
-            elif cmd == "step":
-                self.playing = False
-                self.status = "paused"
-                self._step()
-                stepped = True
-            elif cmd == "until":  # fast-forward (no waiting) to a simulated time
-                session = self._session
-                assert session is not None
-                self.status = "fast-forward"
-                while session.time_s < float(arg) and not session.finished:  # type: ignore[arg-type]
-                    self._step()
-                self.status = "running" if self.playing else "paused"
-                stepped = True
-            elif cmd == "speed":
-                self.speed = float(arg)  # type: ignore[arg-type]
-            elif cmd == "reset":
-                self._load()
-            elif cmd == "scenario":
-                self.index = int(arg) % len(self.specs)  # type: ignore[call-overload]
-                self._load()
-            elif cmd == "config":
-                self.config_name = str(arg)
-                self._load()
+                self._conn.send(("quit", None))
+            except OSError:
+                pass
+        if self._proc is not None:
+            self._proc.join(timeout=3)
+            if self._proc.is_alive():
+                self._proc.terminate()
 
-    def _load(self) -> None:
-        self.status = "starting SUMO"
-        if self._session is not None:
-            self._session.close()
-        session = LiveSession(self.spec, config_name=self.config_name)
-        session.open()
-        with self._lock:
-            self._session = session
-            self._fired = []
-        self.playing = False
-        self._publish()
-        self.status = "ready"
+    def send(self, cmd: str, arg: object = None) -> None:
+        if self._conn is not None:
+            try:
+                self._conn.send((cmd, arg))
+            except OSError:
+                self.error = self.error or "the simulation process has stopped"
 
-    def _step(self) -> None:
-        session = self._session
-        assert session is not None
-        new = session.advance()
-        if new:
-            positions = {v.vehicle_id: (v.x, v.y) for v in session.vehicles()}
-            for e in new:
-                positions.setdefault(e.slot.reporter_id, e.sender_xy)
-            with self._lock:
-                self._fired += [FiredEvent(e, positions) for e in new]
-        self._publish()
+    def _pump(self) -> None:
+        """Take in everything the simulation has sent; keep only the latest snapshot."""
+        conn = self._conn
+        if conn is None:
+            return
+        try:
+            while conn.poll():
+                kind, data = conn.recv()
+                if kind == "snap":
+                    self._snapshot = data
+                    self._version += 1
+                elif kind == "fired":
+                    self._fired += data
+                    self._events += [f.event for f in data]
+                elif kind == "reset":
+                    self._fired, self._events = [], []
+                elif kind == "state":
+                    for key, value in data.items():
+                        if key != "error" or value is not None:
+                            setattr(self, key, value)
+        except (EOFError, OSError):
+            self.status = "error"
+            self.error = self.error or "the simulation process has stopped"
+            self._conn = None
 
-    def _publish(self) -> None:
-        session = self._session
-        assert session is not None
-        vehicles = {v.vehicle_id: v for v in session.vehicles()}
-        snap = Snapshot(
-            t_s=session.time_s,
-            vehicles=vehicles,
-            blocking={v.vehicle_id: v for v in session.blocking()},
-            # Nobody needs a warning about an event that never happened.
-            relevant=frozenset(session.will_reach(vehicles))
-            if session.spec.event_occurred
-            else frozenset(),
-            sensor_flags=session.world.sensor_flags(session.spec.hazard, 200.0),
-            event_active=session.event_active,
-            finished=session.finished,
-        )
-        with self._lock:
-            self._snapshot = snap
-            self._version += 1
+    def latest(self) -> tuple[int, Snapshot | None]:
+        self._pump()
+        return self._version, self._snapshot
+
+    def drain(self) -> list[FiredEvent]:
+        self._pump()
+        out, self._fired = self._fired, []
+        return out
+
+    def events(self) -> list[WarningEvent]:
+        self._pump()
+        return list(self._events)
