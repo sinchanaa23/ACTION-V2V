@@ -277,7 +277,7 @@ class SumoWorld:
             t.vehicletype.setMaxSpeed(type_id, max_speed_mps)
             t.vehicletype.setAccel(type_id, accel)
             t.vehicletype.setDecel(type_id, decel)
-        route_id = f"{vehicle_id}_route"
+        route_id = f"{vehicle_id}_route_{self.time_s:.0f}"
         t.route.add(route_id, list(edges))
         t.vehicle.add(vehicle_id, route_id, typeID=type_id, depart="now", departLane="best")
 

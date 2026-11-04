@@ -81,13 +81,16 @@ from ursina import (
 )
 from ursina import time as utime
 from ursina.shaders import unlit_shader
+from voice_proc import VoiceHandle
 from worker import FiredEvent, SimWorker, Snapshot
 
 from v2v.experiments import CONFIGS
 from v2v.sim.delivery import DEFAULT_MODEL
+from v2v.sim.driver import verdict
 from v2v.sim.live import ORIGIN, WarningEvent, scenario_specs
 from v2v.sim.osm_network import CORRIDORS
 from v2v.sim.world3d import Scene, build_scene, context_paths
+from v2v.voice.listener import models_ready
 
 CORRIDOR = CORRIDORS["hebbal"]
 NET_DIR = REPO / "sim_out" / "networks" / CORRIDOR.name
@@ -448,6 +451,9 @@ class SimView(Entity):
         self.snap: Snapshot | None = None
         self.selected: tuple[str, ...] | None = None
         self.hazard_tab = "details"
+        self.voice: VoiceHandle | None = None
+        self.voice_override: tuple[str, str, float] | None = None
+        """Screenshots only: show the voice strip in a given state."""
         self.ground_truth = False
         self.warned_needed: set[str] = set()
         self.warned_unneeded: set[str] = set()
@@ -471,6 +477,7 @@ class SimView(Entity):
         )
         self._hud_at = 0.0
         self._fps = 60.0
+        self._slow_since: float | None = None
         self._build_hazard()
         self.load_scenario()
 
@@ -602,6 +609,15 @@ class SimView(Entity):
         if event.zone_edges:
             for e in zone_overlay(self.lanes, event.zone_edges, self.origin).entities():
                 self.zone_entities.append(additive(e))
+        if event.spoken:  # the hazard is wherever the driver said it, so mark it
+            column = instance(
+                self.beam_mesh,
+                tint_to=rgba(RED, 0.6),
+                shader=unlit_shader,
+                position=centre,
+                scale=(5, 110, 5),
+            )
+            self.zone_entities.append(additive(column))
         self.waves.append(Wave(self, centre, event.radius_m, rgb, 2.6, 0.6))
 
     # --- events ------------------------------------------------------------------------
@@ -617,8 +633,11 @@ class SimView(Entity):
         self.bubble_until = time.perf_counter() + 3.5
         if not e.sent:
             self.toast(
-                tint(AMBER, f"{e.slot.role.capitalize()} report at {e.t_s:.0f} s held back")
-                + muted(f"  ·  {r.assessed.status}, no warning sent")
+                self.spoken_summary(e)
+                if e.spoken
+                else tint(AMBER, f"{e.slot.role.capitalize()} report at {e.t_s:.0f} s held back")
+                + muted(f"  ·  {r.assessed.status}, no warning sent"),
+                8.0 if e.spoken else 6.0,
             )
             return
         self.show_zone(e)
@@ -652,6 +671,13 @@ class SimView(Entity):
                 )
             )
         self.missed = set(e.missed)
+        if e.spoken:
+            self.toast(
+                self.spoken_summary(e) + faint(f"  ·  {len(e.delivered)} drivers warned"), 9.0
+            )
+            # the hazard is where the driver is: fly there, not to the scenario's
+            self.rig.fly_to(self.u(*e.centre_xy, 0.0), max(e.radius_m * 0.85, 420.0), 50.0)
+            return
         self.toast(
             (tint(RED, "False alarm  ·  ") if e.false_alarm else "")
             + tint(CYAN, f"{r.assessed.status.capitalize()} warning sent")
@@ -661,6 +687,48 @@ class SimView(Entity):
         )
         if self.rig.mode == "tour" and time.perf_counter() - self.rig.scrolled_at > 3.0:
             self.rig.scroll.go(next(i for i, c in enumerate(self.chapters) if c.key == "geocast"))
+
+    def spoken_summary(self, e: WarningEvent) -> str:
+        """What the driver said, and whether it was safe to send."""
+        word, why = verdict(e)
+        colour = {"Confirmed": GREEN, "Sent as unverified": AMBER, "Blocked": RED}[word]
+        return muted(f"“{e.text}”   ") + tint(colour, word) + muted(f"  ·  {why}")
+
+    def voice_vehicle(self) -> str | None:
+        """Who speaks: the selected vehicle, else the one nearest the hazard (touring) or
+        nearest where the camera looks (exploring)."""
+        sel = self.selected
+        if sel and sel[0] == "vehicle" and sel[1] in self.cars and not self.cars[sel[1]].blocking:
+            return sel[1]
+        # touring: where the action is (the hazard); exploring: wherever you are looking
+        focus = Vec3(*self.rig.pose.focus) if self.rig.mode == "explore" else self.hazard_pos
+        near = min(
+            (c for c in self.cars.values() if not c.blocking),
+            key=lambda c: (c.body.position - focus).length(),
+            default=None,
+        )
+        return near.vid if near is not None else None
+
+    def submit_voice(self, roman: str) -> None:
+        """A spoken report from the speaking vehicle, through the real pipeline."""
+        vid = self.voice_vehicle()
+        if vid is None:
+            self.toast(tint(AMBER, "No vehicle on the road yet to speak as. Press space to play."))
+            return
+        self.worker.send("voice", (vid, roman))
+        self.toast(muted(f"{vid}:  ") + tint(WHITE, f"“{roman}”") + muted("   checking…"), 5.0)
+
+    def refresh_voice(self) -> None:
+        if self.voice_override is not None:
+            phase, words, level = self.voice_override
+            error = None
+        elif self.voice is not None:
+            v = self.voice
+            phase, words, level, error = v.phase, v.words, v.level, v.error
+        else:
+            phase, words, level, error = "off", "", 0.0, None
+        vehicle = self.voice_vehicle() if phase != "off" else None
+        self.hud.voice(phase, words, level, vehicle, error)
 
     def toast(self, text: str, seconds: float = 6.0) -> None:
         self.hud.toast.text = text
@@ -721,12 +789,18 @@ class SimView(Entity):
         dt = utime.dt
         now = time.perf_counter()
         self._fps = self._fps * 0.95 + (1 / max(dt, 1e-4)) * 0.05
+        self._guard_quality(now)
         version, snap = self.worker.latest()
         if version != self.version and snap is not None:
             self.version = version
             self.apply(snap)
         for fired in self.worker.drain():
             self.fire(fired)
+        if self.voice is not None:
+            for _heard, roman in self.voice.poll():
+                self.submit_voice(roman)
+        for note in self.worker.notes():
+            self.toast(tint(AMBER, note))
         dist = self.rig.dist
         size = min(2.2, max(1.0, dist / 260))  # true size up close, a touch larger from afar
         beam_h = min(150.0, max(6.0, dist * 0.16))  # a hint up close, a beacon from afar
@@ -759,10 +833,26 @@ class SimView(Entity):
             self.bubble.enabled = False
         if self.hud.toast.text.strip() and now > self.hud.toast_until:
             self.hud.toast.text = " "
+        self.refresh_voice()
         self.refresh_tour()
         if now - self._hud_at > 0.2:
             self._hud_at = now
             self.refresh_hud()
+
+    def _guard_quality(self, now: float) -> None:
+        """If the frame rate stays low, drop the glow filter (the costliest effect)
+        rather than let the view crawl, e.g. on integrated graphics while recording."""
+        filters = getattr(base, "_v2v_filters", None)  # noqa: F821 - Panda3D's global
+        if filters is None:
+            return
+        if self._fps >= 22.0:
+            self._slow_since = None
+        elif self._slow_since is None:
+            self._slow_since = now
+        elif now - self._slow_since > 3.0:
+            filters.delBloom()
+            base._v2v_filters = None  # noqa: F821
+            self.toast(muted("Glow turned off to keep the view smooth on this GPU."), 5.0)
 
     def apply(self, snap: Snapshot) -> None:
         self.snap = snap
@@ -1024,7 +1114,10 @@ class SimView(Entity):
             "suppressed": tint(MUTED, "suppressed"),
         }[a.status]
         lines = [
-            faint(f"{e.slot.role} report at {e.t_s:.0f} s  ·  {e.text_source} text"),
+            faint(
+                f"{'spoken' if e.spoken else e.slot.role} report at {e.t_s:.0f} s"
+                f"  ·  {e.text_source} text"
+            ),
             *(tint(WHITE, line) for line in wrap(f'"{e.text}"', 50)),
             f"{muted('read as')}  {i.hazard.value.replace('_', ' ')}  p={i.p_class:.2f}"
             + (tint(AMBER, "  negated") if i.negated else "")
@@ -1052,7 +1145,9 @@ class SimView(Entity):
                     f"False alarm: no real event, so all {len(e.delivered)} deliveries were unneeded.",
                 )
             )
-        if e.text_source == "fixture":
+        if e.spoken:
+            lines.append(tint(AMBER, "Spoken live: a demo input, never data or results."))
+        elif e.text_source == "fixture":
             lines.append(
                 tint(AMBER, "Fixture text: a code-path demo until P1's\nreal reports exist.")
             )
@@ -1092,6 +1187,9 @@ def main() -> None:
         "--no-bloom", action="store_true", help="skip the glow filter (slower GPUs)"
     )
     parser.add_argument(
+        "--speed", type=float, default=4.0, choices=SPEEDS, help="simulated seconds per second"
+    )
+    parser.add_argument(
         "--screenshot", type=Path, help="save one frame and quit (for docs and checks)"
     )
     parser.add_argument("--chapter", type=float, help="with --screenshot: tour position to hold")
@@ -1111,6 +1209,8 @@ def main() -> None:
     parser.add_argument(
         "--follow", action="store_true", help="with --screenshot: chase-camera view"
     )
+    parser.add_argument("--say", help="with --screenshot: speak this report from a vehicle")
+    parser.add_argument("--mic-preview", help="with --screenshot: show the strip hearing this")
     parser.add_argument(
         "--after-report",
         type=float,
@@ -1170,6 +1270,7 @@ def main() -> None:
         config_name=args.config,
     )
     worker.start()
+    voice = VoiceHandle()
     rig = CameraRig([Shot((0.0, 0.0, 0.0), 200.0, 24.0, 3000.0, 38.0)])
 
     class Sky(Entity):
@@ -1201,7 +1302,20 @@ def main() -> None:
         view.ground_truth = not view.ground_truth
         view._hud_at = 0
 
+    def mic() -> None:
+        if not voice.active and not models_ready():
+            view.toast(
+                tint(
+                    AMBER, "Speech models are missing: run python -m v2v.voice.listener --download"
+                ),
+                8.0,
+            )
+            return
+        voice.toggle()
+        view._hud_at = 0
+
     actions = {
+        "mic": mic,
         "play": lambda: run("pause" if worker.playing else "play"),
         "step": lambda: run("step"),
         "reset": lambda: switch("reset", None),
@@ -1223,9 +1337,10 @@ def main() -> None:
     }
     hud = Hud(actions, SPEEDS, 6)
     view = SimView(worker, world, origin, hud, rig)
+    view.voice = voice
     rig.pose = rig.free = rig.shots[0]
     rig.on_mode = lambda: setattr(view, "_hud_at", 0)
-    run("speed", 4.0)
+    run("speed", args.speed)
 
     class Keys(Entity):
         def input(self, key: str) -> None:
@@ -1243,6 +1358,10 @@ def main() -> None:
                 view.skip()
             elif key == "c":
                 actions["dock"]()
+            elif key == "m":
+                actions["mic"]()
+            elif key == "v":
+                voice.tap()
             elif key == "t":
                 rig.tour()
             elif key == "tab":
@@ -1289,9 +1408,15 @@ def main() -> None:
                     None if args.after_report is not None else self.started + args.wait
                 )
                 self.saved = False
+                self.said = False
+                if args.mic_preview:
+                    view.voice_override = ("listening", args.mic_preview, 0.5)
 
             def update(self) -> None:
                 now = time.perf_counter()
+                if args.say and not self.said and now - self.started > 6.0 and view.cars:
+                    self.said = True
+                    view.submit_voice(args.say)
                 if args.select and args.select != "hazard" and view.selected is None:
                     view.select(("vehicle", args.select))
                 if args.select == "hazard":
@@ -1314,6 +1439,7 @@ def main() -> None:
         Director()
     app.run()
     worker.stop()
+    voice.close()
 
 
 if __name__ == "__main__":

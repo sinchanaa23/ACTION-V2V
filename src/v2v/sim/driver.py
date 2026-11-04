@@ -24,7 +24,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from v2v.contracts import ResolvedLocation, VehicleState, WarningMessage
+from v2v.contracts import NON_HAZARD_TYPES, ResolvedLocation, VehicleState, WarningMessage
+from v2v.data.scrub import scrub
 from v2v.geocast import directional
 from v2v.geocast.directional import Reach, RoadGraph
 from v2v.sim.delivery import DEFAULT_MODEL, DeliveryOutcome
@@ -183,6 +184,47 @@ class Bearing:
         if a >= 145:
             return "behind"
         return "right" if self.relative_deg > 0 else "left"
+
+
+@dataclass(frozen=True)
+class VoiceReport:
+    """A spoken report and what the system did with it."""
+
+    heard: str
+    """As the speech model wrote it."""
+    cleaned: str
+    """Romanised, with personal details scrubbed: what the pipeline read."""
+    event: WarningEvent
+    reporter: str
+    positions: dict[str, tuple[float, float]]
+    """Every vehicle at send time, for showing who was reached."""
+    heading_deg: float
+    """The reporter's heading at send time. "Behind you" means behind this
+    direction, even if the vehicle has since turned."""
+
+    @property
+    def recipients(self) -> tuple[str, ...]:
+        w = self.event.result.warning
+        return tuple(v for v in w.recipients if v != self.reporter) if w else ()
+
+    @property
+    def delivered(self) -> dict[str, float]:
+        return {v: ms for v, ms in self.event.delivered.items() if v != self.reporter}
+
+
+def verdict(event: WarningEvent) -> tuple[str, str]:
+    """Whether a report was safe to pass on, and why, in plain words."""
+    r = event.result
+    i, a = r.interpretation, r.assessed
+    if a.status == "corroborated":
+        return "Confirmed", f"{a.n_reports} independent reports and nearby sensors support it"
+    if a.status == "unverified":
+        return "Sent as unverified", "The reading is confident, but nothing corroborates it yet"
+    if i.negated:
+        return "Blocked", "The report says the hazard is not there"
+    if i.hazard in NON_HAZARD_TYPES:
+        return "Blocked", "No road hazard in this report"
+    return "Blocked", "Too unsure what this report means"
 
 
 def bearing_from(v: VehicleState, x: float, y: float, by_road_m: float | None = None) -> Bearing:
@@ -431,6 +473,41 @@ class DriverSession:
         alert = SentAlert(k, vehicle_id, world.time_s, where, message, outcome)
         self.sent.append(alert)
         return alert
+
+    def respawn(self, vehicle_id: str) -> bool:
+        """Put a demo vehicle back at the start of its route once it has finished,
+        so a long demo always has a vehicle to report from."""
+        if self.on_road(vehicle_id) or self.live.finished or self.state(vehicle_id) is None:
+            return False
+        d = DEMO_BY_ID[vehicle_id]
+        edges = self.spec.approach_route if d.route == "approach" else self.spec.opposing_route
+        self.live.world.add_vehicle(
+            d.vehicle_id,
+            edges,
+            f"demo_{d.kind}",
+            d.vclass,
+            d.length_m,
+            d.width_m,
+            d.max_speed_mps,
+            d.accel,
+            d.decel,
+        )
+        self.trails[vehicle_id] = []
+        return True
+
+    def voice_report(self, vehicle_id: str, heard: str, roman: str) -> VoiceReport:
+        """Run a spoken report through the pipeline, from this vehicle, now.
+
+        Personal details are scrubbed first. With no place named, the hazard sits
+        at the reporter, flagged approximate, and the geocast goes to the drivers
+        behind it (``geocast.fallback``)."""
+        if self.state(vehicle_id) is None or not self.on_road(vehicle_id):
+            raise KeyError(f"{vehicle_id} is not on the road")
+        cleaned = scrub(roman)
+        event = self.live.report_from(vehicle_id, cleaned)
+        positions = {v.vehicle_id: (v.x, v.y) for v in self.live.vehicles()}
+        heading = self.live.world.vehicle(vehicle_id).heading_deg
+        return VoiceReport(heard, cleaned, event, vehicle_id, positions, heading)
 
     def where_is(
         self, vehicle_id: str, x: float, y: float, edge_id: str | None = None, pos_m: float = 0.0

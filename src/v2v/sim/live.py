@@ -13,9 +13,17 @@ is P3's fixture pool (``source="fixture"``), and every event says so.
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 from v2v.confidence.dedup import HazardTracker
-from v2v.contracts import DriverReport, ExperimentConfig, RunResult, VehicleState
+from v2v.contracts import (
+    DriverReport,
+    ExperimentConfig,
+    HazardType,
+    RunResult,
+    Source,
+    VehicleState,
+)
 from v2v.eval.runner import DEMO_POOL, ReportPool
 from v2v.experiments import CONFIGS
 from v2v.geocast import directional
@@ -25,6 +33,8 @@ from v2v.sim.scenarios import ReportSlot, ScenarioSpec
 from v2v.sim.traci_loop import SumoWorld, net_file, road_graph
 
 ORIGIN = "origin"
+VOICE_SLOT = "-voice-"
+"""In the slot id of a report a driver spoke (see ``LiveSession.report_from``)."""
 """Relay id for a warning sent from the hazard point (no sender vehicle)."""
 
 
@@ -61,6 +71,11 @@ class WarningEvent:
     inside the zone (backward, forward or both carriageways, as the hazard
     type decides). Empty for circular and broadcast, and when the heading
     rule had to stand in."""
+
+    @property
+    def spoken(self) -> bool:
+        """A driver said this report aloud, rather than the scenario timing it."""
+        return VOICE_SLOT in self.slot.slot_id
 
     @property
     def sent(self) -> bool:
@@ -129,6 +144,7 @@ class LiveSession:
     _world: SumoWorld | None = None
     _tracker: HazardTracker | None = None
     _used: set[str] = field(default_factory=set)
+    _spoken: int = 0
 
     @property
     def config(self) -> ExperimentConfig:
@@ -196,17 +212,42 @@ class LiveSession:
         return {vid for vid in ids if world.will_reach(vid, hazard)}
 
     def _fire(self, slot: ReportSlot, t_pass: float) -> WarningEvent | None:
-        world, spec = self.world, self.spec
+        spec = self.spec
         record = self.pool.pick(
             slot.needs, slot.hazard_class, f"{spec.scenario_id}-{slot.slot_id}", self._used
         )
         if record is None:
             return None  # no text of the kind this slot needs
         self._used.add(record.report_id)
+        return self._process(slot, t_pass, record.text, cast(Source, record.source))
+
+    def report_from(self, vehicle_id: str, text: str) -> WarningEvent:
+        """A report a vehicle's driver makes right now (spoken, in Driver mode),
+        through the same pipeline as the scenario's reports. Its text is a live
+        demo input, so it carries ``source="fixture"``: never data, never results."""
+        world = self.world
+        self._spoken += 1
+        slot = ReportSlot(
+            slot_id=f"{vehicle_id}{VOICE_SLOT}{self._spoken}",
+            role="original",
+            needs="hazard",
+            hazard_class=HazardType.AMBIGUOUS,  # the pipeline reads the class from the text
+            reporter_id=vehicle_id,
+            route=(world.vehicle(vehicle_id).edge_id,),
+            depart_s=world.time_s,
+            delay_s=0.0,
+            expected_report_s=world.time_s,
+        )
+        event = self._process(slot, world.time_s, text, "fixture")
+        self.events.append(event)
+        return event
+
+    def _process(self, slot: ReportSlot, t_pass: float, text: str, source: Source) -> WarningEvent:
+        world, spec = self.world, self.spec
         report = DriverReport(
             report_id=slot.slot_id,
-            text=record.text,
-            source=record.source,
+            text=text,
+            source=source,
             reporter_id=slot.reporter_id,
             t_sim=world.time_s,
         )
@@ -245,8 +286,8 @@ class LiveSession:
             t_s=world.time_s,
             t_pass_s=t_pass,
             slot=slot,
-            text=record.text,
-            text_source=record.source,
+            text=text,
+            text_source=source,
             result=result,
             outcome=outcome,
             sender_xy=(reporter.x, reporter.y),

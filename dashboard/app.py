@@ -9,7 +9,8 @@ Reads traces written by ``v2v.sim.recorder`` (``V2V_TRACES_DIR``, default
 hazard, delivery, timeline and report-to-warning trace), Road Network,
 Reports, Policy Comparison and Settings: the Overseer view, fleet-wide.
 Driver mode (``ui_driver``) is one demo vehicle's own dashboard on a live SUMO
-run; the two buttons at the top of the rail switch between them. Report text,
+run; the buttons at the top of the rail switch between them, and Voice report
+(``ui_voice``) takes spoken reports from a vehicle. Report text,
 the NLP reading and the confidence verdict are shown as pending until P3's
 experiment runner records them; nothing here is placeholder data presented as
 results.
@@ -27,6 +28,7 @@ from ui_data import alerts, load, metrics, trace_files, traces_dir  # noqa: E402
 from ui_driver import page_driver  # noqa: E402
 from ui_pages import PAGES, init_prefs  # noqa: E402
 from ui_theme import BLUE, ORANGE, RED, TEXT, chip, html, inject_css, pct  # noqa: E402
+from ui_voice import page_voice  # noqa: E402
 
 from v2v.sim.recorder import Trace  # noqa: E402
 
@@ -51,6 +53,7 @@ def rail() -> str:
         for mid, name, icon in (
             ("overseer", "Overseer mode: fleet-wide monitoring", ":material/monitoring:"),
             ("driver", "Driver mode: one vehicle's dashboard", ":material/directions_car:"),
+            ("voice", "Voice report: say hey ACTION", ":material/mic:"),
         ):
             st.button(
                 name,
@@ -62,8 +65,8 @@ def rail() -> str:
                 args=(mid,),
             )
         html('<div style="height:1px;width:28px;background:rgba(255,255,255,0.1)"></div>')
-        if mode == "driver":
-            return "driver"
+        if mode in ("driver", "voice"):
+            return str(mode)
         for pid, (name, icon, _) in PAGES.items():
             if pid == "settings":
                 html('<div style="height:34vh"></div>')
@@ -163,6 +166,9 @@ def main() -> None:
     page = rail()
     if page == "driver":
         page_driver()
+        return
+    if page == "voice":
+        page_voice()
         return
     directory = traces_dir()
     traces = load(trace_files(directory)) if directory.is_dir() else {}

@@ -58,6 +58,8 @@ _NOT_A_NAME: frozenset[str] = frozenset(
         "paani", "pani", "tree", "debris", "breakdown", "truck", "car", "bus", "bike",
         "auto", "gaadi", "gadi", "scooty", "lorry", "tempo", "cab", "vehicle", "someone",
         "very", "too", "so", "also", "now", "abhi", "today", "aaj", "not", "no", "nahi",
+        "mujhe", "mera", "meri", "mere", "main", "hum", "ek", "dikh", "dikha", "dikhi",
+        "dekha", "dekho", "see", "saw", "can", "seen",
     }
 )  # fmt: skip
 
@@ -217,6 +219,8 @@ HAZARD_WORDS: frozenset[str] = frozenset(
         "paani", "pani", "debris", "tree", "ped", "jam", "blocked", "block", "breakdown",
         "broken", "kharab", "stalled", "puncture", "stuck", "speeding", "rash",
         "hazard", "obstruction", "barricade", "construction", "digging", "khudai",
+        "animal", "animals", "janwar", "bandar", "monkey", "monkeys", "gaay", "cow", "cows",
+        "cattle", "bhains", "buffalo", "saand", "bull", "kutta", "kutte", "dog", "dogs", "stray",
     }
 )  # fmt: skip
 

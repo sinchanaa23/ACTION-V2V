@@ -44,7 +44,12 @@ camera flies to the geocast view when a warning goes out. Drag to explore freely
 "Back to tour" returns. Click a vehicle or the hazard for its card; the controls fold
 into the dock at the bottom left (C). Space play/pause, K skip to the event, N step,
 R reset, F follow, G ground truth, 1-7 speed, [ ] scenario, Tab hide the interface,
-F11 full screen, `--no-bloom` on slower GPUs. Report text stays fixture text (labelled
+F11 full screen, `--no-bloom` on slower GPUs. **Voice in the 3D view:** press M (or the Voice button on the dock)
+to turn the microphone on, say "hey ACTION" and then the report; V talks without the wake
+phrase. The words appear live at the bottom, the report runs through the real pipeline as the
+selected vehicle (click a car to speak as it; otherwise the one nearest the hazard), and the
+verdict, geocast zone and relay hops appear on the road. Needs `pip install -e ".[voice]"` and
+`python -m v2v.voice.listener --download` once. Report text stays fixture text (labelled
 in the card) until P1's real test split exists.
 
 The web dashboard has two modes, switched with the two buttons at the top of its rail.
@@ -55,6 +60,23 @@ live SUMO run as real vehicles: a heading-up perspective navigation view of the 
 and buildings, the route ahead and the path travelled, speed and turn cues, traffic in
 sight, only the V2V messages that vehicle received (with where they are relative to it),
 and three driver alerts of its own, one per geocast direction.
+
+**Voice report** (third button on the dashboard rail): pick a vehicle, start the microphone
+and say "hey ACTION, mujhe ek bandar road pe naacha hua dikh raha hai". Speech is recognised
+offline with Vosk (a wake-phrase model, then a Hindi model for the report), nothing leaves the
+laptop and no audio is stored. The words appear live, then the report runs through the real
+pipeline from that vehicle: Devanagari is respelled as Hinglish, personal details are scrubbed,
+the NLP reads it, the confidence stage decides whether it is safe to send (confirmed,
+unverified or blocked), and a template warning goes by directional geocast to the drivers
+behind the vehicle. A text box and tap-to-talk work without the wake phrase.
+
+```bash
+pip install -e ".[voice]"
+python -m v2v.voice.listener --download      # once: two speech models, about 80 MB
+python -m v2v.voice.listener                 # try the microphone in the terminal
+```
+
+Spoken reports are live demo input (`source="fixture"`): never data, never results.
 
 Directional geocast (`geocast/directional.py`) covers stretches of directed road (SUMO
 edges are one carriageway each) within the radius by driving distance: **backward**

@@ -8,6 +8,8 @@ selected. Every value shown is read from the live SUMO session or the
 pipeline's output for the selected thing.
 """
 
+import math
+import time
 from collections.abc import Callable, Sequence
 
 from ursina import Button, Entity, Mesh, Quad, Text, Vec3, camera, color, curve, window
@@ -267,13 +269,14 @@ class Dock:
         a = window.aspect_ratio
         m = 0.035
         self.open = False
-        self.pill = Glass(-a / 2 + m, -0.5 + m + 0.052, 0.39, 0.052)
+        self.pill = Glass(-a / 2 + m, -0.5 + m + 0.052, 0.5, 0.052)
         p = self.pill
         self.play_b = button(p, " ", 0.01, -0.008, 0.036, 0.036, actions["play"])
         self.play_icon = icon("play", self.play_b, 0.42)
         self.pause_icon = icon("pause", self.play_b, 0.42)
         self.time_l = label(p, " ", 0.058, -0.016, 0.68)
         self.more_b = button(p, "Controls", 0.29, -0.01, 0.09, 0.032, actions["dock"])
+        self.mic_b = button(p, "Voice", 0.39, -0.01, 0.09, 0.032, actions["mic"])
 
         self.panel = Glass(-a / 2 + m, -0.5 + m + 0.31, 0.6, 0.25)
         q = self.panel
@@ -459,12 +462,64 @@ class Hud:
             scale=0.5,
         )
 
+        # voice strip, bottom centre: shown only while the microphone is on
+        vy = -0.5 + m + 0.075
+        self.voice_orb = Entity(
+            parent=ui, model="circle", scale=0.034, position=(0, vy, -0.01), enabled=False
+        )
+        self.voice_state = Text(
+            " ", parent=ui, origin=(0, 0), position=(0, vy - 0.038), scale=0.62, enabled=False
+        )
+        self.voice_words = Text(
+            " ", parent=ui, origin=(0, 0), position=(0, vy + 0.05), scale=1.05, enabled=False
+        )
+        self.voice_hint = Text(
+            " ", parent=ui, origin=(0, 0), position=(0, vy - 0.062), scale=0.48, enabled=False
+        )
+
         self.dock = Dock(actions, speeds)
         self.card = Card(actions["deselect"])
         self.toast = Text(
             " ", parent=ui, origin=(0, 0.5), position=(0, 0.5 - m - 0.004), scale=0.66
         )
         self.toast_until = 0.0
+
+    def voice(
+        self, phase: str, words: str, level: float, vehicle: str | None, error: str | None
+    ) -> None:
+        """The voice strip: an orb that breathes while waiting for "hey ACTION" and
+        pulses with your voice while listening, with your words live above it."""
+        on = phase != "off" or bool(error)
+        for e in (self.voice_orb, self.voice_state, self.voice_words, self.voice_hint):
+            e.enabled = on and self.shown
+        self.dock.mic_b.color = BTN_ON if phase != "off" else BTN
+        if not on:
+            return
+        t = time.perf_counter()
+        if phase == "listening":
+            colour, size = (RED, 0.034 + 0.03 * min(1.0, level * 3) + 0.004 * math.sin(t * 9))
+        elif phase == "waiting":
+            colour, size = (CYAN, 0.032 + 0.003 * math.sin(t * 2.2))
+        else:
+            colour, size = (MUTED, 0.03)
+        self.voice_orb.color = color.rgba(*colour, 0.9)
+        self.voice_orb.scale = size
+        state = {
+            "loading": "Loading the speech models…",
+            "waiting": 'Say "Hey ACTION"',
+            "listening": "Listening",
+            "off": "Microphone problem",
+        }[phase]
+        self.voice_state.text = tint(colour, spaced(state) if phase == "listening" else state)
+        self.voice_words.text = tint(WHITE, words) if words else " "
+        self.voice_hint.text = (
+            faint(f"{error}")
+            if error
+            else faint(
+                f"speaking as {vehicle}" if vehicle else "no vehicle yet: press space to play"
+            )
+            + faint("   ·   click a car to speak as it   ·   V to talk now   ·   M to stop")
+        )
 
     def set_shown(self, shown: bool) -> None:
         """Tab: hide every panel for a clean view (the card too)."""
