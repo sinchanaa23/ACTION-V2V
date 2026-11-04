@@ -28,7 +28,30 @@ MIN_LOG_ODDS = 1.0
 
 SEED_KEYWORDS: dict[HazardType, tuple[str, ...]] = {
     HazardType.ACCIDENT: ("accident", "crash", "collision", "collided", "takkar", "overturned"),
-    HazardType.OBSTRUCTION: ("pothole", "gaddha", "debris", "barricade", "fallen tree", "blocked"),
+    HazardType.OBSTRUCTION: (
+        "pothole",
+        "gaddha",
+        "debris",
+        "barricade",
+        "fallen tree",
+        "blocked",
+        # animals on the road count as obstructions (docs/annotation_guide.md)
+        "animal",
+        "janwar",
+        "bandar",
+        "monkey",
+        "gaay",
+        "cow",
+        "cattle",
+        "bhains",
+        "buffalo",
+        "saand",
+        "bull",
+        "kutta",
+        "kutte",
+        "dog",
+        "stray",
+    ),  # fmt: skip
     HazardType.SLIPPERY: ("slippery", "waterlogging", "waterlogged", "flooded", "oil spill"),
     HazardType.STOPPED: ("breakdown", "broke down", "broken down", "stalled", "puncture"),
     HazardType.SPEEDING: ("speeding", "overspeeding", "wrong side", "rash driving", "racing"),

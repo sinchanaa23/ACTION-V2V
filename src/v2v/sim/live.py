@@ -13,9 +13,17 @@ is P3's fixture pool (``source="fixture"``), and every event says so.
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 from v2v.confidence.dedup import HazardTracker
-from v2v.contracts import DriverReport, ExperimentConfig, RunResult, VehicleState
+from v2v.contracts import (
+    DriverReport,
+    ExperimentConfig,
+    HazardType,
+    RunResult,
+    Source,
+    VehicleState,
+)
 from v2v.eval.runner import DEMO_POOL, ReportPool
 from v2v.experiments import CONFIGS
 from v2v.geocast import directional
@@ -129,6 +137,7 @@ class LiveSession:
     _world: SumoWorld | None = None
     _tracker: HazardTracker | None = None
     _used: set[str] = field(default_factory=set)
+    _spoken: int = 0
 
     @property
     def config(self) -> ExperimentConfig:
@@ -196,17 +205,42 @@ class LiveSession:
         return {vid for vid in ids if world.will_reach(vid, hazard)}
 
     def _fire(self, slot: ReportSlot, t_pass: float) -> WarningEvent | None:
-        world, spec = self.world, self.spec
+        spec = self.spec
         record = self.pool.pick(
             slot.needs, slot.hazard_class, f"{spec.scenario_id}-{slot.slot_id}", self._used
         )
         if record is None:
             return None  # no text of the kind this slot needs
         self._used.add(record.report_id)
+        return self._process(slot, t_pass, record.text, cast(Source, record.source))
+
+    def report_from(self, vehicle_id: str, text: str) -> WarningEvent:
+        """A report a vehicle's driver makes right now (spoken, in Driver mode),
+        through the same pipeline as the scenario's reports. Its text is a live
+        demo input, so it carries ``source="fixture"``: never data, never results."""
+        world = self.world
+        self._spoken += 1
+        slot = ReportSlot(
+            slot_id=f"{vehicle_id}-voice-{self._spoken}",
+            role="original",
+            needs="hazard",
+            hazard_class=HazardType.AMBIGUOUS,  # the pipeline reads the class from the text
+            reporter_id=vehicle_id,
+            route=(world.vehicle(vehicle_id).edge_id,),
+            depart_s=world.time_s,
+            delay_s=0.0,
+            expected_report_s=world.time_s,
+        )
+        event = self._process(slot, world.time_s, text, "fixture")
+        self.events.append(event)
+        return event
+
+    def _process(self, slot: ReportSlot, t_pass: float, text: str, source: Source) -> WarningEvent:
+        world, spec = self.world, self.spec
         report = DriverReport(
             report_id=slot.slot_id,
-            text=record.text,
-            source=record.source,
+            text=text,
+            source=source,
             reporter_id=slot.reporter_id,
             t_sim=world.time_s,
         )
@@ -245,8 +279,8 @@ class LiveSession:
             t_s=world.time_s,
             t_pass_s=t_pass,
             slot=slot,
-            text=record.text,
-            text_source=record.source,
+            text=text,
+            text_source=source,
             result=result,
             outcome=outcome,
             sender_xy=(reporter.x, reporter.y),

@@ -238,18 +238,24 @@ closed mid-drive never says so; the next drive to start closes such ones."""
 _open_lock = threading.Lock()
 
 
-def _touch(session: DriverSession) -> None:
+def touch(session: DriverSession) -> None:
     with _open_lock:
         _open[id(session)] = (session, time.monotonic())
 
 
-def _reap() -> None:
+def reap() -> None:
     now = time.monotonic()
     with _open_lock:
         stale = [k for k, (_, seen) in _open.items() if now - seen > IDLE_S]
         for k in stale:
             session, _ = _open.pop(k)
             session.close()
+
+
+def forget(session: DriverSession) -> None:
+    """A drive that ended on purpose no longer needs watching."""
+    with _open_lock:
+        _open.pop(id(session), None)
 
 
 def _close_drive() -> None:
@@ -264,11 +270,11 @@ def _close_drive() -> None:
 
 def _start(spec: ScenarioSpec, config: str, vid: str) -> None:
     _close_drive()
-    _reap()
+    reap()
     with st.spinner("Starting SUMO and driving the demo vehicles onto the road…"):
         session = DriverSession(spec, config_name=config)
         session.open()
-    _touch(session)
+    touch(session)
     st.session_state["drive"] = session
     st.session_state["drive_vid"] = vid
     st.session_state.setdefault("drive_play", True)
@@ -392,7 +398,7 @@ def cockpit() -> None:
 
     @st.fragment(run_every=0.5 if playing else None)
     def live() -> None:
-        _touch(session)
+        touch(session)
         if st.session_state.get("drive_play", True):
             # half a second per tick; the remainder carries over so 1x stays real time
             due = st.session_state.get("drive_due", 0.0) + speed * 0.5

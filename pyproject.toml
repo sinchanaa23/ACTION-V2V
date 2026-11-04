@@ -39,6 +39,7 @@ sim = [
 ]
 dashboard = ["streamlit>=1.35", "plotly>=5.24", "pandas>=2.1"]  # plotly 5.24+: token-free maps
 sim3d = ["ursina>=7.0"]  # 3D simulation (Panda3D); use with the sim extras
+voice = ["vosk>=0.3.45", "sounddevice>=0.4"]  # spoken reports, offline
 dev = ["pytest>=8.0", "ruff>=0.4", "mypy>=1.10"]
 
 [tool.hatch.build.targets.wheel]
@@ -68,5 +69,7 @@ plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
 # SUMO's Python tools ship without type hints and aren't installed in the base CI job.
-module = ["sumo", "sumolib", "sumolib.*", "traci", "traci.*", "libsumo", "pyproj"]
+module = [
+    "sumo", "sumolib", "sumolib.*", "traci", "traci.*", "libsumo", "pyproj", "vosk", "sounddevice",
+]
 ignore_missing_imports = true

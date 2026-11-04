@@ -56,6 +56,23 @@ and buildings, the route ahead and the path travelled, speed and turn cues, traf
 sight, only the V2V messages that vehicle received (with where they are relative to it),
 and three driver alerts of its own, one per geocast direction.
 
+**Voice report** (third button on the dashboard rail): pick a vehicle, start the microphone
+and say "hey ACTION, mujhe ek bandar road pe naacha hua dikh raha hai". Speech is recognised
+offline with Vosk (a wake-phrase model, then a Hindi model for the report), nothing leaves the
+laptop and no audio is stored. The words appear live, then the report runs through the real
+pipeline from that vehicle: Devanagari is respelled as Hinglish, personal details are scrubbed,
+the NLP reads it, the confidence stage decides whether it is safe to send (confirmed,
+unverified or blocked), and a template warning goes by directional geocast to the drivers
+behind the vehicle. A text box and tap-to-talk work without the wake phrase.
+
+```bash
+pip install -e ".[voice]"
+python -m v2v.voice.listener --download      # once: two speech models, about 80 MB
+python -m v2v.voice.listener                 # try the microphone in the terminal
+```
+
+Spoken reports are live demo input (`source="fixture"`): never data, never results.
+
 Directional geocast (`geocast/directional.py`) covers stretches of directed road (SUMO
 edges are one carriageway each) within the radius by driving distance: **backward**
 (traffic approaching the point on its carriageway: accident, obstruction, stopped or

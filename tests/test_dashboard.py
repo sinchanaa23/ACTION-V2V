@@ -256,3 +256,17 @@ def test_driver_view_helpers() -> None:
     assert where_text(on_route) == "160 m ahead on your route"
     assert relevance(on_route)[1] == "on your route"
     assert relevance(Bearing(300.0, 179.0, None))[1] == "passed"
+
+
+@needs_streamlit
+def test_voice_mode_opens_without_a_microphone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = _app(tmp_path, monkeypatch).run()
+    app.button(key="mode_voice").click().run()
+    assert not app.exception
+    assert app.session_state["mode"] == "voice"
+    text = " ".join(m.value for m in app.markdown) + " ".join(w.value for w in app.warning)
+    assert "Voice report" in text
+    app.button(key="mode_overseer").click().run()
+    assert not app.exception
