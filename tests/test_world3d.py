@@ -150,3 +150,55 @@ def test_render_side_keeps_the_latest_snapshot_and_every_event(
         assert w.status == "error" and w.error  # the process went away: say so
     finally:
         sys.modules.pop("worker", None)
+
+
+def test_the_microphone_handle_keeps_the_latest_state_and_hands_over_reports(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import multiprocessing as mp
+
+    monkeypatch.syspath_prepend(str(SIM3D))
+    import voice_proc
+
+    try:
+        here, there = mp.Pipe()
+        mic = voice_proc.VoiceHandle()
+        mic._conn, mic.phase = here, "loading"
+        there.send(("state", "waiting", "", 0.1, None))
+        there.send(("state", "listening", "mujhe", 0.4, None))
+        there.send(("report", "मुझे", "mujhe gaddha hai"))
+        assert mic.poll() == [("मुझे", "mujhe gaddha hai")]
+        assert (mic.phase, mic.words, mic.level) == ("listening", "mujhe", 0.4)
+        assert mic.poll() == []  # handed over once
+        mic.stop()
+        assert there.recv() == "stop" and mic.phase == "off"
+        there.send(("state", "waiting", "late", 0.0, None))
+        mic.poll()
+        assert mic.phase == "off"  # a stale update does not switch it back on
+        there.close()
+        mic.poll()
+        assert mic.error
+    finally:
+        sys.modules.pop("voice_proc", None)
+
+
+def test_the_simulation_process_can_leave_a_note_for_the_player(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pytest.importorskip("sumolib")
+    import multiprocessing as mp
+
+    from tests.test_scenarios import _spec
+
+    monkeypatch.syspath_prepend(str(SIM3D))
+    import worker
+
+    try:
+        here, there = mp.Pipe()
+        w = worker.SimWorker([_spec(tmp_path)])
+        w._conn = here
+        there.send(("note", "bg_1 is not on the road any more"))
+        assert w.notes() == ["bg_1 is not on the road any more"]
+        assert w.notes() == []
+    finally:
+        sys.modules.pop("worker", None)

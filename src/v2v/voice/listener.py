@@ -144,7 +144,7 @@ class VoiceFlow:
         self._elapsed += seconds
         self._quiet += seconds
         self._listen(pcm)
-        limit = NO_SPEECH_S if not self.transcript() else END_SILENCE_S
+        limit = END_SILENCE_S if self.said_something() else NO_SPEECH_S
         if self._quiet >= limit or self._elapsed >= MAX_REPORT_S:
             return self._finish()
         return None
@@ -152,6 +152,12 @@ class VoiceFlow:
     def transcript(self) -> str:
         """Everything said so far, in Devanagari."""
         return " ".join([*self._done, self.partial]).strip()
+
+    def said_something(self) -> bool:
+        """Whether any real words came after the wake phrase. The tail of "action"
+        replayed from the lookback does not count, or a pause before the report
+        would end it after 1.2 s with nothing in it."""
+        return bool(strip_wake_words(romanise(self.transcript())))
 
     def _confirmed(self, recent: bytes) -> bool:
         """A second opinion from a model free to hear any word, not just the phrase."""
@@ -173,6 +179,7 @@ class VoiceFlow:
             text = _text(self.speech.Result())
             if text:
                 self._done.append(text)
+                self._quiet = 0.0  # words just arrived
             self.partial = ""
             return
         partial = _text(self.speech.PartialResult(), "partial")
@@ -341,14 +348,18 @@ def main(argv: list[str] | None = None) -> None:
         return
     listener = Listener()
     listener.start()
-    print('say "hey ACTION", Ctrl+C to stop')
+    print('say "hey ACTION" and then your report, Ctrl+C to stop')
     last = ""
+    beat = 0.0
     try:
         while True:
             time.sleep(0.2)
+            if time.monotonic() - beat > 3.0:
+                beat = time.monotonic()
+                print(f"  (mic level {listener.level:.2f}, {listener.phase})")
             if listener.error:
                 raise SystemExit(listener.error)
-            line = f"{listener.phase}: {listener.partial}"
+            line = f"{listener.phase}: {romanise(listener.partial)}"
             if line != last:
                 print(line)
                 last = line

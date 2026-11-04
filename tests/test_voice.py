@@ -223,3 +223,77 @@ def test_voice_report_from_a_vehicle_on_the_real_network(tmp_path: Path) -> None
         assert session.on_road("demo_car")
     finally:
         session.close()
+
+
+def test_a_pause_after_the_wake_phrase_does_not_end_the_report() -> None:
+    """The replayed tail of "action" reaches the speech model as a stray word;
+    it must not shorten the wait for the real report."""
+    wake = FakeRecogniser(["hey action"])
+    speech = FakeRecogniser([("final", "क्शन")])  # what the replay produced
+    flow = VoiceFlow(wake, speech)
+    flow.feed(BLOCK)
+    assert flow.phase == "listening" and not flow.said_something()
+    assert _silence_until_done(flow, 3.0) == []  # a 3 s pause, longer than 1.2 s
+    assert flow.phase == "listening"
+    speech.script = [("final", "गड्ढा है")]
+    flow.feed(BLOCK)
+    assert flow.said_something()
+    (report,) = _silence_until_done(flow, END_SILENCE_S)
+    assert report.roman == "gaddha hai"  # type: ignore[attr-defined]
+
+
+def test_wake_word_remnants_are_not_words() -> None:
+    assert strip_wake_words("kshan mujhe gaddha dikha") == "mujhe gaddha dikha"
+    assert strip_wake_words(romanise("क्शन")) == ""
+
+
+def _event(slot_id: str, text: str = ROMAN):  # type: ignore[no-untyped-def]
+    from v2v.sim.live import WarningEvent
+    from v2v.sim.scenarios import ReportSlot
+
+    slot = ReportSlot(
+        slot_id=slot_id,
+        role="original",
+        needs="hazard",
+        hazard_class=HazardType.AMBIGUOUS,
+        reporter_id="rep",
+        route=("a",),
+        depart_s=0.0,
+        delay_s=0.0,
+        expected_report_s=0.0,
+    )
+    return WarningEvent(
+        t_s=0.0,
+        t_pass_s=0.0,
+        slot=slot,
+        text=text,
+        text_source="fixture",
+        result=run(CONFIGS["proposed"], text),
+        outcome=None,
+        sender_xy=(0.0, 0.0),
+        centre_xy=(0.0, 0.0),
+        radius_m=800.0,
+    )
+
+
+def test_spoken_events_are_recognisable() -> None:
+    from v2v.sim.live import VOICE_SLOT
+
+    assert _event(f"rep{VOICE_SLOT}1").spoken
+    assert not _event("slot_0").spoken
+
+
+@pytest.mark.parametrize(
+    ("text", "word", "why"),
+    [
+        (ROMAN, "Sent as unverified", "The reading is confident, but nothing corroborates it yet"),
+        ("koi bandar nahi hai road pe", "Blocked", "The report says the hazard is not there"),
+        ("traffic is fine today", "Blocked", "No road hazard in this report"),
+    ],
+)
+def test_the_verdict_says_whether_it_was_safe_to_send_and_why(
+    text: str, word: str, why: str
+) -> None:
+    from v2v.sim.driver import verdict
+
+    assert verdict(_event("rep-voice-1", text)) == (word, why)

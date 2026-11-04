@@ -33,6 +33,8 @@ from v2v.sim.scenarios import ReportSlot, ScenarioSpec
 from v2v.sim.traci_loop import SumoWorld, net_file, road_graph
 
 ORIGIN = "origin"
+VOICE_SLOT = "-voice-"
+"""In the slot id of a report a driver spoke (see ``LiveSession.report_from``)."""
 """Relay id for a warning sent from the hazard point (no sender vehicle)."""
 
 
@@ -69,6 +71,11 @@ class WarningEvent:
     inside the zone (backward, forward or both carriageways, as the hazard
     type decides). Empty for circular and broadcast, and when the heading
     rule had to stand in."""
+
+    @property
+    def spoken(self) -> bool:
+        """A driver said this report aloud, rather than the scenario timing it."""
+        return VOICE_SLOT in self.slot.slot_id
 
     @property
     def sent(self) -> bool:
@@ -221,7 +228,7 @@ class LiveSession:
         world = self.world
         self._spoken += 1
         slot = ReportSlot(
-            slot_id=f"{vehicle_id}-voice-{self._spoken}",
+            slot_id=f"{vehicle_id}{VOICE_SLOT}{self._spoken}",
             role="original",
             needs="hazard",
             hazard_class=HazardType.AMBIGUOUS,  # the pipeline reads the class from the text

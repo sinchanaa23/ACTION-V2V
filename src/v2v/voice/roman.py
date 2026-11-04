@@ -112,7 +112,11 @@ def romanise(text: str) -> str:
     return _DEVANAGARI_RUN.sub(word, _DANDA.sub(" ", text)).strip()
 
 
-WAKE_WORDS = ("hey", "he", "hay", "action", "aekshan", "ekshan")
+WAKE_WORDS = (
+    "hey", "he", "hay", "action", "aekshan", "ekshan",
+    # what is left of "action" when the wake audio is replayed mid-word
+    "kshan", "shan", "ction", "akshan", "kashan", "eksan",
+)  # fmt: skip
 
 
 def strip_wake_words(text: str) -> str:

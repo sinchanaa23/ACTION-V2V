@@ -17,6 +17,7 @@ from multiprocessing.connection import Connection
 from typing import Any
 
 from v2v.contracts import VehicleState
+from v2v.data.scrub import scrub
 from v2v.sim.live import LiveSession, WarningEvent
 from v2v.sim.scenarios import ScenarioSpec
 
@@ -98,6 +99,21 @@ class _Sim:
             self.conn.send(("fired", [FiredEvent(e, positions) for e in new]))
         self.publish()
 
+    def voice(self, vehicle_id: str, roman: str) -> None:
+        """A driver's spoken report, now, through the pipeline the scenario's use.
+        Personal details are scrubbed first."""
+        session = self.session
+        assert session is not None
+        try:
+            event = session.report_from(vehicle_id, scrub(roman))
+        except KeyError:
+            self.conn.send(("note", f"{vehicle_id} is not on the road any more"))
+            return
+        positions = {v.vehicle_id: (v.x, v.y) for v in session.vehicles()}
+        positions.setdefault(vehicle_id, event.sender_xy)
+        self.conn.send(("fired", [FiredEvent(event, positions)]))
+        self.publish()
+
     def publish(self) -> None:
         session = self.session
         assert session is not None
@@ -154,6 +170,8 @@ class _Sim:
                     self.pending.append(later)  # play, speed... after the skip
             self.publish()
             self.status = "running" if self.playing else "paused"
+        elif cmd == "voice":
+            self.voice(*arg)
         elif cmd == "speed":
             self.speed = float(arg)
         elif cmd == "reset":
@@ -232,6 +250,7 @@ class SimWorker:
     _version: int = 0
     _fired: list[FiredEvent] = field(default_factory=list)
     _events: list[WarningEvent] = field(default_factory=list)
+    _notes: list[str] = field(default_factory=list)
 
     @property
     def spec(self) -> ScenarioSpec:
@@ -282,6 +301,8 @@ class SimWorker:
                 elif kind == "fired":
                     self._fired += data
                     self._events += [f.event for f in data]
+                elif kind == "note":
+                    self._notes.append(data)
                 elif kind == "reset":
                     self._fired, self._events = [], []
                 elif kind == "state":
@@ -300,6 +321,12 @@ class SimWorker:
     def drain(self) -> list[FiredEvent]:
         self._pump()
         out, self._fired = self._fired, []
+        return out
+
+    def notes(self) -> list[str]:
+        """Messages from the simulation process for the player, once each."""
+        self._pump()
+        out, self._notes = self._notes, []
         return out
 
     def events(self) -> list[WarningEvent]:

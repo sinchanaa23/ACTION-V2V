@@ -44,7 +44,12 @@ camera flies to the geocast view when a warning goes out. Drag to explore freely
 "Back to tour" returns. Click a vehicle or the hazard for its card; the controls fold
 into the dock at the bottom left (C). Space play/pause, K skip to the event, N step,
 R reset, F follow, G ground truth, 1-7 speed, [ ] scenario, Tab hide the interface,
-F11 full screen, `--no-bloom` on slower GPUs. Report text stays fixture text (labelled
+F11 full screen, `--no-bloom` on slower GPUs. **Voice in the 3D view:** press M (or the Voice button on the dock)
+to turn the microphone on, say "hey ACTION" and then the report; V talks without the wake
+phrase. The words appear live at the bottom, the report runs through the real pipeline as the
+selected vehicle (click a car to speak as it; otherwise the one nearest the hazard), and the
+verdict, geocast zone and relay hops appear on the road. Needs `pip install -e ".[voice]"` and
+`python -m v2v.voice.listener --download` once. Report text stays fixture text (labelled
 in the card) until P1's real test split exists.
 
 The web dashboard has two modes, switched with the two buttons at the top of its rail.
