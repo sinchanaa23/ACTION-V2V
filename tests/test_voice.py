@@ -15,9 +15,13 @@ from v2v.pipeline import run
 from v2v.voice.listener import (
     BLOCK_SAMPLES,
     END_SILENCE_S,
+    GATE_BLOCKS,
+    GATE_SHARE,
     NO_SPEECH_S,
     RATE,
     VoiceFlow,
+    is_gated,
+    is_silent,
     is_wake_phrase,
     rms,
 )
@@ -297,3 +301,16 @@ def test_the_verdict_says_whether_it_was_safe_to_send_and_why(
     from v2v.sim.driver import verdict
 
     assert verdict(_event("rep-voice-1", text)) == (word, why)
+
+
+def test_a_microphone_cut_to_digital_silence_is_detected() -> None:
+    """A healthy microphone in a room never reads exactly zero; Windows or Realtek
+    noise suppression that gates the signal does, and no speech model can read it."""
+    assert is_silent(bytes(3200)) and not is_silent(bytes(3199) + b"")
+    healthy = [False] * GATE_BLOCKS
+    assert not is_gated(healthy)
+    cut = [i % 3 == 0 for i in range(GATE_BLOCKS)]  # a third of the blocks, between words
+    assert is_gated(cut)
+    barely = [i < GATE_BLOCKS * GATE_SHARE * 0.5 for i in range(GATE_BLOCKS)]
+    assert not is_gated(barely)  # a few quiet blocks are normal
+    assert not is_gated([True] * 10)  # too little evidence yet

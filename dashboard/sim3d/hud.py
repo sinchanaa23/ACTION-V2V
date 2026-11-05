@@ -269,7 +269,7 @@ class Dock:
         a = window.aspect_ratio
         m = 0.035
         self.open = False
-        self.pill = Glass(-a / 2 + m, -0.5 + m + 0.052, 0.5, 0.052)
+        self.pill = Glass(-a / 2 + m, -0.5 + m + 0.052, 0.6, 0.052)
         p = self.pill
         self.play_b = button(p, " ", 0.01, -0.008, 0.036, 0.036, actions["play"])
         self.play_icon = icon("play", self.play_b, 0.42)
@@ -277,6 +277,7 @@ class Dock:
         self.time_l = label(p, " ", 0.058, -0.016, 0.68)
         self.more_b = button(p, "Controls", 0.29, -0.01, 0.09, 0.032, actions["dock"])
         self.mic_b = button(p, "Voice", 0.39, -0.01, 0.09, 0.032, actions["mic"])
+        self.type_b = button(p, "Type", 0.49, -0.01, 0.09, 0.032, actions["type"])
 
         self.panel = Glass(-a / 2 + m, -0.5 + m + 0.31, 0.6, 0.25)
         q = self.panel
@@ -477,6 +478,11 @@ class Hud:
             " ", parent=ui, origin=(0, 0), position=(0, vy - 0.062), scale=0.48, enabled=False
         )
 
+        # the typed-report box: always works, whatever the microphone does
+        self.type_box = Glass(-0.34, -0.5 + m + 0.23, 0.68, 0.058, parent=ui)
+        self.type_text = label(self.type_box, " ", 0.02, -0.016, 0.8)
+        self.type_box.enabled = False
+
         self.dock = Dock(actions, speeds)
         self.card = Card(actions["deselect"])
         self.toast = Text(
@@ -484,15 +490,31 @@ class Hud:
         )
         self.toast_until = 0.0
 
+    def report_box(self, active: bool, text: str) -> None:
+        """The box for typing a report: shown while ``active``, with a blinking cursor."""
+        self.type_box.enabled = active and self.shown
+        self.dock.type_b.color = BTN_ON if active else BTN
+        if active:
+            cursor = "|" if int(time.perf_counter() * 2) % 2 else " "
+            self.type_text.text = (
+                muted("Type a report, Enter sends, Esc cancels:  ") + tint(WHITE, text) + cursor
+            )
+
     def voice(
-        self, phase: str, words: str, level: float, vehicle: str | None, error: str | None
+        self,
+        phase: str,
+        words: str,
+        level: float,
+        vehicle: str | None,
+        error: str | None,
+        gated: bool = False,
     ) -> None:
         """The voice strip: an orb that breathes while waiting for "hey ACTION" and
         pulses with your voice while listening, with your words live above it."""
         on = phase != "off" or bool(error)
+        self.dock.mic_b.color = BTN_ON if phase != "off" else BTN
         for e in (self.voice_orb, self.voice_state, self.voice_words, self.voice_hint):
             e.enabled = on and self.shown
-        self.dock.mic_b.color = BTN_ON if phase != "off" else BTN
         if not on:
             return
         t = time.perf_counter()
@@ -513,7 +535,13 @@ class Hud:
         self.voice_state.text = tint(colour, spaced(state) if phase == "listening" else state)
         self.voice_words.text = tint(WHITE, words) if words else " "
         self.voice_hint.text = (
-            faint(f"{error}")
+            tint(
+                AMBER,
+                "Windows is cutting your microphone signal (noise suppression). "
+                "Press Enter to type instead.",
+            )
+            if gated and not error
+            else faint(f"{error}")
             if error
             else faint(
                 f"speaking as {vehicle}" if vehicle else "no vehicle yet: press space to play"

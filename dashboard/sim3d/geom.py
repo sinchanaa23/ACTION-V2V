@@ -145,3 +145,24 @@ def lerp_angle(a: float, b: float, t: float) -> float:
     """Shortest-way interpolation between two headings in degrees."""
     d = (b - a + 180.0) % 360.0 - 180.0
     return (a + d * t) % 360.0
+
+
+TYPEABLE = ".,'-?!/"
+MAX_TYPED = 160
+
+
+def type_into(text: str, key: str) -> tuple[str, str | None]:
+    """One key press for a report being typed: (the new text, then "send" or
+    "cancel" when the key ends it, else None). Letters, digits and light
+    punctuation are kept; every other key (shift, arrows, mouse) is ignored."""
+    if key in ("enter", "return"):
+        return text, "send"
+    if key == "escape":
+        return text, "cancel"
+    if key == "backspace":
+        return text[:-1], None
+    if key == "space":
+        return (text + " " if len(text) < MAX_TYPED else text), None
+    if len(key) == 1 and (key.isalnum() or key in TYPEABLE) and len(text) < MAX_TYPED:
+        return text + key, None
+    return text, None

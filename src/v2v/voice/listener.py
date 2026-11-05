@@ -1,6 +1,7 @@
 """Always-listening microphone: "hey ACTION", then a live transcript. Owner: P4.
 
     python -m v2v.voice.listener --download     # once: the two offline speech models
+    python -m v2v.voice.listener --check        # nothing heard? test the microphone
     python -m v2v.voice.listener                # try it: prints what it hears
     python -m v2v.voice.listener --wav test.wav # the same from a 16 kHz mono file
 
@@ -21,7 +22,7 @@ import urllib.request
 import wave
 import zipfile
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -52,6 +53,13 @@ END_SILENCE_S = 1.2
 NO_SPEECH_S = 7.0
 """Give up if nothing is said this long after the wake phrase."""
 MAX_REPORT_S = 25.0
+GATE_BLOCKS = 60
+"""Blocks (6 s) watched for a microphone signal that drops to digital silence."""
+GATE_SHARE = 0.15
+"""A real microphone in a room never reads exactly zero. If this share of recent
+blocks is pure digital silence, something between the microphone and this program
+(typically Windows' or Realtek's noise suppression, "audio enhancements") is cutting
+the signal between and inside words, and no speech model can read what is left."""
 
 Phase = Literal["waiting", "listening"]
 
@@ -76,6 +84,16 @@ class Heard:
 
 def _text(result: str, key: str = "text") -> str:
     return str(json.loads(result).get(key, "")).strip()
+
+
+def is_silent(pcm: bytes) -> bool:
+    """A block with every sample exactly zero."""
+    return pcm.count(0) == len(pcm)
+
+
+def is_gated(recent: "Sequence[bool]") -> bool:
+    """Whether the recent blocks show a cut-off signal (see GATE_SHARE)."""
+    return len(recent) >= GATE_BLOCKS // 2 and sum(recent) / len(recent) >= GATE_SHARE
 
 
 def is_wake_phrase(heard: str) -> bool:
@@ -245,6 +263,8 @@ class Listener:
         self.phase: Literal["off", "loading", "waiting", "listening"] = "off"
         self.partial = ""
         self.level = 0.0
+        self.gated = False
+        """The signal keeps dropping to digital silence: see GATE_SHARE."""
         self.error: str | None = None
 
     @property
@@ -265,7 +285,7 @@ class Listener:
         if self._thread is not None:
             self._thread.join(timeout=2)
         self._thread = None
-        self.phase, self.partial, self.level = "off", "", 0.0
+        self.phase, self.partial, self.level, self.gated = "off", "", 0.0, False
 
     def tap(self) -> None:
         """Start a report without the wake phrase."""
@@ -297,6 +317,7 @@ class Listener:
                 callback=capture,
             ):
                 self.phase = "waiting"
+                silent: deque[bool] = deque(maxlen=GATE_BLOCKS)
                 while not self._halt.is_set():
                     if self._tap.is_set():
                         self._tap.clear()
@@ -306,6 +327,8 @@ class Listener:
                     except queue.Empty:
                         continue
                     self.level = rms(pcm)
+                    silent.append(is_silent(pcm))
+                    self.gated = is_gated(silent)
                     report = flow.feed(pcm)
                     self.phase, self.partial = flow.phase, flow.transcript()
                     if report is not None:
@@ -323,11 +346,71 @@ def rms(pcm: bytes) -> float:
     return min(1.0, math.sqrt(sum(s * s for s in samples) / len(samples)) / 8_000)
 
 
+GATE_ADVICE = (
+    "Windows (or the sound driver) is cutting your microphone signal to digital silence,\n"
+    "which no speech model can read. Turn off the microphone's noise suppression:\n"
+    "  Windows: Settings > System > Sound > Input > pick your microphone > turn\n"
+    "           'Audio enhancements' / 'Enhance audio' OFF.\n"
+    "  Realtek: open 'Realtek Audio Console' > Microphone > turn Noise Suppression and\n"
+    "           Beam Forming off.\n"
+    "Then run this check again. Until then you can type reports instead."
+)
+
+
+def check(seconds: float = 8.0) -> int:
+    """Record once from the default microphone and say what is wrong, if anything."""
+    import sounddevice
+
+    print(
+        f"Recording {seconds:.0f} s. Say: hey ACTION, then: mujhe ek bandar road pe dikh raha hai"
+    )
+    chunks: list[bytes] = []
+
+    def capture(data: Any, frames: int, when: Any, status: Any) -> None:
+        chunks.append(bytes(data))
+
+    with sounddevice.RawInputStream(
+        samplerate=RATE, blocksize=BLOCK_SAMPLES, channels=1, dtype="int16", callback=capture
+    ):
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < seconds:
+            time.sleep(0.5)
+            level = rms(chunks[-1]) if chunks else 0.0
+            print(f"  level {level:.2f} " + "#" * int(level * 40))
+    silent = [is_silent(c) for c in chunks]
+    share = sum(silent) / max(len(silent), 1)
+    peak = max((rms(c) for c in chunks), default=0.0)
+    print(f"\nsilent blocks: {share:.0%}   loudest: {peak:.2f}")
+    if share >= GATE_SHARE:
+        print("PROBLEM:", GATE_ADVICE)
+        return 1
+    if peak < 0.03:
+        print("PROBLEM: almost nothing was heard. Check the microphone is not muted and raise its")
+        print("input volume (Settings > System > Sound > Input), or choose another microphone.")
+        return 1
+    if not models_ready():
+        print("Signal looks healthy. Download the speech models next: --download")
+        return 0
+    flow = build_flow()
+    audio = b"".join(chunks) + bytes(int(RATE * 2 * (END_SILENCE_S + 1)))
+    for i in range(0, len(audio), BLOCK_SAMPLES * 2):
+        heard = flow.feed(audio[i : i + BLOCK_SAMPLES * 2])
+        if heard is not None:
+            print(f"Signal looks healthy. It understood: {heard.roman}")
+            return 0
+    print("Signal looks healthy but no report was recognised. Say 'hey ACTION', pause, then the")
+    print("report, a little slower and closer to the microphone, and try again.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--check", action="store_true", help="test the microphone and explain")
     parser.add_argument("--download", action="store_true", help="fetch the speech models")
     parser.add_argument("--wav", type=Path, help="read a 16 kHz mono WAV instead of the mic")
     args = parser.parse_args(argv)
+    if args.check:
+        raise SystemExit(check())
     if args.download:
         download_models()
         return
