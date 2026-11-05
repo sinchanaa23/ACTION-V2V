@@ -36,7 +36,8 @@ def _serve(conn: Connection) -> None:
             now = time.monotonic()
             if now - last_sent >= STATE_EVERY_S:
                 last_sent = now
-                conn.send(("state", mic.phase, romanise(mic.partial), mic.level, mic.error))
+                state = (mic.phase, romanise(mic.partial), mic.level, mic.error, mic.gated)
+                conn.send(("state", *state))
             for heard in mic.take():
                 conn.send(("report", heard.devanagari, heard.roman))
             conn.poll(0.03)
@@ -56,6 +57,8 @@ class VoiceHandle:
     """What is being said, live, in Hinglish."""
     level: float = 0.0
     error: str | None = None
+    gated: bool = False
+    """The microphone signal keeps dropping to digital silence (see v2v.voice.listener)."""
     _conn: Connection | None = None
     _proc: Any = None
     _reports: list[tuple[str, str]] = field(default_factory=list)
@@ -78,7 +81,7 @@ class VoiceHandle:
 
     def stop(self) -> None:
         self._send("stop")
-        self.phase, self.words, self.level = "off", "", 0.0
+        self.phase, self.words, self.level, self.gated = "off", "", 0.0, False
 
     def toggle(self) -> None:
         self.stop() if self.active else self.start()
@@ -112,7 +115,7 @@ class VoiceHandle:
                 while conn.poll():
                     kind, *data = conn.recv()
                     if kind == "state" and self.phase != "off":
-                        self.phase, self.words, self.level, error = data
+                        self.phase, self.words, self.level, error, self.gated = data
                         self.error = error or self.error
                     elif kind == "report":
                         self._reports.append((data[0], data[1]))

@@ -34,7 +34,7 @@ REPO = Path(__file__).resolve().parents[2]
 os.chdir(REPO)  # scenario files use repo-relative paths
 
 from atmosphere import FOG_RANGE, HORIZON, additive, fog_shader, hills, sky_dome
-from geom import lerp_angle, slow_motion, to_ursina
+from geom import lerp_angle, slow_motion, to_ursina, type_into
 from hud import (
     AMBER,
     BLUE,
@@ -166,6 +166,8 @@ class CameraRig(Entity):
         self.follow: Entity | None = None
         self.mx = self.my = 0.0
         self.scrolled_at = -1e9
+        self.locked = False
+        """Typing a report: the camera keys must not move the view."""
         self.on_mode: object = None
         self.apply(self.pose)
 
@@ -220,7 +222,7 @@ class CameraRig(Entity):
         self.my += (max(-0.5, min(0.5, mouse.y)) - self.my) * k
         progress = self.scroll.update(dt)
         dragging = mouse.right or mouse.middle
-        keys = {k: held_keys[k] for k in "wasdqe"}
+        keys = {k: 0 if self.locked else held_keys[k] for k in "wasdqe"}
         if (dragging or any(keys.values())) and self.mode == "tour":
             self.explore()
         if self.mode == "tour":
@@ -452,6 +454,8 @@ class SimView(Entity):
         self.selected: tuple[str, ...] | None = None
         self.hazard_tab = "details"
         self.voice: VoiceHandle | None = None
+        self.typing = False
+        self.typed = ""
         self.voice_override: tuple[str, str, float] | None = None
         """Screenshots only: show the voice strip in a given state."""
         self.ground_truth = False
@@ -727,8 +731,27 @@ class SimView(Entity):
             phase, words, level, error = v.phase, v.words, v.level, v.error
         else:
             phase, words, level, error = "off", "", 0.0, None
+        gated = self.voice is not None and self.voice.gated and self.voice_override is None
         vehicle = self.voice_vehicle() if phase != "off" else None
-        self.hud.voice(phase, words, level, vehicle, error)
+        self.hud.voice(phase, words, level, vehicle, error, gated)
+        self.hud.report_box(self.typing, self.typed)
+
+    def begin_typing(self) -> None:
+        """Open the box for typing a report (Enter): works with or without a microphone."""
+        self.typing, self.typed = True, ""
+        self.rig.locked = True
+
+    def end_typing(self, send: bool) -> None:
+        text, self.typing, self.typed = self.typed.strip(), False, ""
+        self.rig.locked = False
+        if send and text:
+            self.submit_voice(text)
+
+    def type_key(self, key: str) -> None:
+        """One key press while the report box is open."""
+        self.typed, end = type_into(self.typed, key)
+        if end is not None:
+            self.end_typing(end == "send")
 
     def toast(self, text: str, seconds: float = 6.0) -> None:
         self.hud.toast.text = text
@@ -888,7 +911,8 @@ class SimView(Entity):
             show_caption=not exploring
             and self.hud.shown
             and not self.hud.dock.open
-            and not self.hud.card.visible,
+            and not self.hud.card.visible
+            and not self.typing,
         )
 
     def refresh_hud(self) -> None:
@@ -1211,6 +1235,7 @@ def main() -> None:
     )
     parser.add_argument("--say", help="with --screenshot: speak this report from a vehicle")
     parser.add_argument("--mic-preview", help="with --screenshot: show the strip hearing this")
+    parser.add_argument("--type-preview", help="with --screenshot: show the report box with this")
     parser.add_argument(
         "--after-report",
         type=float,
@@ -1316,6 +1341,7 @@ def main() -> None:
 
     actions = {
         "mic": mic,
+        "type": lambda: view.end_typing(False) if view.typing else view.begin_typing(),
         "play": lambda: run("pause" if worker.playing else "play"),
         "step": lambda: run("step"),
         "reset": lambda: switch("reset", None),
@@ -1344,7 +1370,12 @@ def main() -> None:
 
     class Keys(Entity):
         def input(self, key: str) -> None:
-            if key == "space":
+            if view.typing:  # every key goes into the report, none moves the camera
+                view.type_key(key)
+                return
+            if key in ("enter", "return"):
+                view.begin_typing()
+            elif key == "space":
                 actions["play"]()
             elif key == "n":
                 actions["step"]()
@@ -1411,6 +1442,8 @@ def main() -> None:
                 self.said = False
                 if args.mic_preview:
                     view.voice_override = ("listening", args.mic_preview, 0.5)
+                if args.type_preview:
+                    view.typing, view.typed = True, args.type_preview
 
             def update(self) -> None:
                 now = time.perf_counter()

@@ -164,15 +164,15 @@ def test_the_microphone_handle_keeps_the_latest_state_and_hands_over_reports(
         here, there = mp.Pipe()
         mic = voice_proc.VoiceHandle()
         mic._conn, mic.phase = here, "loading"
-        there.send(("state", "waiting", "", 0.1, None))
-        there.send(("state", "listening", "mujhe", 0.4, None))
+        there.send(("state", "waiting", "", 0.1, None, True))
+        there.send(("state", "listening", "mujhe", 0.4, None, False))
         there.send(("report", "मुझे", "mujhe gaddha hai"))
         assert mic.poll() == [("मुझे", "mujhe gaddha hai")]
-        assert (mic.phase, mic.words, mic.level) == ("listening", "mujhe", 0.4)
+        assert (mic.phase, mic.words, mic.level, mic.gated) == ("listening", "mujhe", 0.4, False)
         assert mic.poll() == []  # handed over once
         mic.stop()
         assert there.recv() == "stop" and mic.phase == "off"
-        there.send(("state", "waiting", "late", 0.0, None))
+        there.send(("state", "waiting", "late", 0.0, None, False))
         mic.poll()
         assert mic.phase == "off"  # a stale update does not switch it back on
         there.close()
@@ -202,3 +202,34 @@ def test_the_simulation_process_can_leave_a_note_for_the_player(
         assert w.notes() == []
     finally:
         sys.modules.pop("worker", None)
+
+
+def test_typing_a_report_keeps_text_and_ignores_the_rest(geom) -> None:  # type: ignore[no-untyped-def]
+    text = ""
+    for key in [
+        "m",
+        "u",
+        "j",
+        "h",
+        "e",
+        "space",
+        "b",
+        "a",
+        "n",
+        "d",
+        "a",
+        "r",
+        ",",
+        "shift",
+        "left arrow",
+        "!",
+    ]:
+        text, end = geom.type_into(text, key)
+        assert end is None
+    assert text == "mujhe bandar,!"  # shift and arrows ignored
+    assert geom.type_into(text, "backspace") == ("mujhe bandar,", None)
+    assert geom.type_into("", "backspace") == ("", None)
+    assert geom.type_into(text, "enter") == (text, "send")
+    assert geom.type_into(text, "escape") == (text, "cancel")
+    assert geom.type_into("x" * geom.MAX_TYPED, "y")[0] == "x" * geom.MAX_TYPED  # capped
+    assert geom.type_into("x" * geom.MAX_TYPED, "space")[0] == "x" * geom.MAX_TYPED
