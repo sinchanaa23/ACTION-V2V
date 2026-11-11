@@ -41,6 +41,47 @@ python dashboard/sim3d/app.py                    # --scenario noisy-low-s0 --con
 # else is refused. Click other cars to see what they received. --scripted plays the dataset demo.
 ```
 
+### Driver sandbox: be a car, report a hazard
+
+The 3D app opens as a sandbox on real SUMO traffic. You are a driver, not a viewer:
+
+1. **Click any car** to become it. It turns gold, the camera follows it, and the line at the
+   top says what to do next.
+2. **Speak or type.** Say "hey ACTION" and then the report, or press Enter and type it.
+3. **A hazard is geocast, and only a hazard.** The banner says what it was taken as and how
+   many cars were addressed and reached. Anything else is refused, not sent.
+4. **Click the other cars** to see exactly what each one received, or why it got nothing.
+
+![The 3D app on start-up, with the microphone strip at the bottom](docs/screenshots/01-start.webp)
+
+![Be a driver: click any car to become it](docs/screenshots/02-be-a-driver.png)
+
+You are a car (gold, with the YOU card). The Controls panel has the geocast radius, 0.8, 2
+or 5 km (`--radius`, default 5), which is how far back along the road a warning travels:
+
+![You are approach.3: the controls with the 0.8 / 2 / 5 km geocast radius](docs/screenshots/03-you-are-a-car.png)
+
+A message that is not about a road hazard is **not geocast**:
+
+![Not a hazard message: refused, nothing is sent](docs/screenshots/04-not-a-hazard.png)
+
+A hazard is geocast to the cars that need it. Clicking one of those cars shows the warning it
+received, how far it was from the reporter, and the radio hop it came through:
+
+![Hazard reported: accident, and the card of a car that received it](docs/screenshots/06-received.png)
+
+Reach depends on traffic. The radio range is 300 m and relays cannot cross an empty road, so
+on sparse traffic a warning may be addressed to cars it never reaches (below: 3 cars
+addressed, 0 reached). Dense traffic reaches nearly every addressed car:
+
+![A hazard report in sparse traffic: addressed but not reached](docs/screenshots/05-geocast-sparse.webp)
+
+Typing (Enter) always works. If the microphone is silent, run
+`python -m v2v.voice.listener --devices`, then `--check --mic <number>` with a number that shows
+bars while you speak, and set `V2V_MIC` to it. Report text spoken or typed in the demo is
+labelled as fixture text and is never data or a result. `--scripted` plays the dataset's
+scripted reports and hazard instead of the sandbox.
+
 It opens as a scroll-driven tour: the mouse wheel (or the arrow keys) glides the camera
 through six chapters (the corridor, the flyovers, the hazard, the geocast region) and the
 camera flies to the geocast view when a warning goes out. Drag to explore freely; T or
@@ -50,7 +91,7 @@ R reset, F follow, G ground truth, 1-7 speed, [ ] scenario, Tab hide the interfa
 F11 full screen, `--no-bloom` on slower GPUs. **Voice in the 3D view:** press M (or the Voice button on the dock)
 to turn the microphone on, say "hey ACTION" and then the report; V talks without the wake
 phrase. The words appear live at the bottom, the report runs through the real pipeline as the
-selected vehicle (click a car to speak as it; otherwise the one nearest the hazard), and the
+car you clicked (click a car to speak as it), and the
 verdict, geocast zone and relay hops appear on the road. Needs `pip install -e ".[voice]"` and
 `python -m v2v.voice.listener --download` once. Report text stays fixture text (labelled
 in the card) until P1's real test split exists.
