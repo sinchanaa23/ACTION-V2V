@@ -20,7 +20,9 @@ from v2v.contracts import (
     DriverReport,
     ExperimentConfig,
     HazardType,
+    ResolvedLocation,
     RunResult,
+    Scenario,
     Source,
     VehicleState,
 )
@@ -28,7 +30,7 @@ from v2v.eval.runner import DEMO_POOL, ReportPool
 from v2v.experiments import CONFIGS
 from v2v.geocast import directional
 from v2v.pipeline import process_report
-from v2v.sim.delivery import DEFAULT_MODEL, DeliveryModel, DeliveryOutcome
+from v2v.sim.delivery import DEFAULT_MODEL, DeliveryModel, DeliveryOutcome, model_for_radius
 from v2v.sim.scenarios import ReportSlot, ScenarioSpec
 from v2v.sim.traci_loop import SumoWorld, net_file, road_graph
 
@@ -140,6 +142,11 @@ class LiveSession:
     pool: ReportPool = field(default_factory=lambda: ReportPool(DEMO_POOL, allow_reuse=True))
     seed: int = 0
     model: DeliveryModel = DEFAULT_MODEL
+    radius_m: float | None = None
+    """Geocast radius in metres, replacing the config's 800 m (the demo reaches up
+    to 5 km). None keeps the config's own, so experiments are unaffected."""
+    scripted: bool = True
+    """Fire the scenario's own reports. Off for a sandbox where only drivers report."""
     events: list[WarningEvent] = field(default_factory=list)
     _world: SumoWorld | None = None
     _tracker: HazardTracker | None = None
@@ -148,7 +155,15 @@ class LiveSession:
 
     @property
     def config(self) -> ExperimentConfig:
-        return CONFIGS[self.config_name]
+        base = CONFIGS[self.config_name]
+        return (
+            base if self.radius_m is None else base.model_copy(update={"radius_m": self.radius_m})
+        )
+
+    @property
+    def delivery_model(self) -> DeliveryModel:
+        """The radio model, with enough relay hops to cross the geocast radius."""
+        return model_for_radius(self.config.radius_m, self.model)
 
     @property
     def world(self) -> SumoWorld:
@@ -195,8 +210,8 @@ class LiveSession:
         if self.finished:
             return []
         world.step()
-        fired = [self._fire(slot, t_pass) for slot, t_pass in world.due_reports()]
-        new = [e for e in fired if e is not None]
+        due = world.due_reports() if self.scripted else []
+        new = [e for e in (self._fire(slot, t_pass) for slot, t_pass in due) if e is not None]
         self.events.extend(new)
         return new
 
@@ -238,12 +253,38 @@ class LiveSession:
             delay_s=0.0,
             expected_report_s=world.time_s,
         )
-        event = self._process(slot, world.time_s, text, "fixture")
+        me = world.vehicle(vehicle_id)
+        here = ResolvedLocation(
+            edge_id=me.edge_id,
+            pos_m=me.lane_pos_m,
+            x=me.x,
+            y=me.y,
+            approx=True,
+            heading_deg=me.heading_deg,
+        )
+        # the driver is the source of truth: the hazard is where they say it is
+        scenario = Scenario(
+            scenario_id=f"{self.spec.scenario_id}-voice",
+            hazard_location=here,
+            event_occurred=True,
+            reporter_id=vehicle_id,
+            report_time_s=world.time_s,
+        )
+        event = self._process(slot, world.time_s, text, "fixture", scenario)
         self.events.append(event)
         return event
 
-    def _process(self, slot: ReportSlot, t_pass: float, text: str, source: Source) -> WarningEvent:
+    def _process(
+        self,
+        slot: ReportSlot,
+        t_pass: float,
+        text: str,
+        source: Source,
+        scenario: Scenario | None = None,
+    ) -> WarningEvent:
         world, spec = self.world, self.spec
+        spoken = scenario is not None
+        scenario = scenario or spec.to_scenario()
         report = DriverReport(
             report_id=slot.slot_id,
             text=text,
@@ -252,21 +293,32 @@ class LiveSession:
             t_sim=world.time_s,
         )
         assert self._tracker is not None
-        result = process_report(
-            report, world, spec.to_scenario(), self.config, self._tracker, self.seed
-        )
+        result = process_report(report, world, scenario, self.config, self._tracker, self.seed)
         reporter = world.vehicle(slot.reporter_id)
         location = result.assessed.location
         centre = (location.x, location.y) if location is not None else (reporter.x, reporter.y)
+        ground = location if spoken and location is not None else scenario.hazard_location
         outcome = None
         hops: tuple[Pulse, ...] = ()
         if result.warning is not None:
-            # The pipeline's delivery is seeded by the message id, so this replays
-            # exactly the same outcome, with the hop counts and relays kept.
-            outcome = self.model.deliver(
-                result.warning, world, spec.hazard, sender_id=slot.reporter_id
+            # The pipeline's delivery is seeded by the message id, so with the default
+            # radio model this replays the same outcome, keeping hop counts and relays.
+            # A long radius needs more relay hops than the pipeline's model allows, so
+            # the deliveries are replaced by this session's (and stay consistent).
+            outcome = self.delivery_model.deliver(
+                result.warning, world, ground, sender_id=slot.reporter_id
             )
             hops = pulses(outcome, slot.reporter_id)
+            update: dict[str, object] = {"deliveries": outcome.records}
+            if spoken:  # who needs it: whoever will still reach the point the driver named
+                update["relevant_vehicle_ids"] = tuple(
+                    sorted(
+                        v.vehicle_id
+                        for v in world.vehicles()
+                        if world.will_reach(v.vehicle_id, ground)
+                    )
+                )
+            result = result.model_copy(update=update)
         zone: dict[str, float] = {}
         graph = road_graph(net_file(Path(spec.sumocfg)))
         if (

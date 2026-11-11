@@ -110,3 +110,17 @@ def test_nobody_needs_a_warning_about_an_event_that_never_happened() -> None:
     assert real.relevant and not real.false_alarm
     assert false.false_alarm and false.relevant == frozenset() and false.missed == frozenset()
     assert false.unneeded == frozenset(false.delivered)  # every delivery was unneeded
+
+
+def test_the_demo_can_widen_the_geocast_without_touching_the_experiments(tmp_path: Path) -> None:
+    from tests.test_scenarios import _spec
+    from v2v.experiments import CONFIGS
+    from v2v.sim.live import LiveSession
+
+    spec = _spec(tmp_path)
+    assert LiveSession(spec).config.radius_m == 800.0  # the experiments' own
+    wide = LiveSession(spec, radius_m=5000.0)
+    assert wide.config.radius_m == 5000.0 and wide.config.distribution == "directional"
+    assert wide.delivery_model.max_hops == 21
+    assert CONFIGS["proposed"].radius_m == 800.0  # a copy: the shared config is unchanged
+    assert LiveSession(spec).delivery_model.max_hops == 5

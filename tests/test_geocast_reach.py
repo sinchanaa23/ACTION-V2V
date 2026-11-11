@@ -215,3 +215,87 @@ def test_suppression_cuts_rebroadcasts_without_losing_recipients() -> None:
     delivered = {r.vehicle_id for r in smart.records if r.delivered}
     assert delivered == set(ids) - {"v0"}  # everyone still gets it
     assert len(smart.records) == len(ids)  # one record each: no duplicate delivery
+
+
+# A long straight road m0 -> m1 -> m2 -> m3 (1000 m each, heading north, x=0) with the hazard
+# 500 m into m3, and a side road s0 -> s1 -> s2 (west, then turning north) joining at the
+# start of m2, so it is a branch of the main road, not a continuation of it.
+CORR_SHAPES = {
+    "m0": [(0.0, 0.0), (0.0, 1000.0)],
+    "m1": [(0.0, 1000.0), (0.0, 2000.0)],
+    "m2": [(0.0, 2000.0), (0.0, 3000.0)],
+    "m3": [(0.0, 3000.0), (0.0, 4000.0)],
+    "s0": [(-2400.0, 2000.0), (-1500.0, 2000.0)],
+    "s1": [(-1500.0, 2000.0), (-600.0, 2000.0)],
+    "s2": [(-600.0, 2000.0), (-1.0, 2000.0)],
+}
+CORR = RoadGraph.from_edges(
+    [
+        ("m0", 1000.0, ["m1"]),
+        ("m1", 1000.0, ["m2"]),
+        ("m2", 1000.0, ["m3"]),
+        ("m3", 1000.0, []),
+        ("s0", 900.0, ["s1"]),
+        ("s1", 900.0, ["s2"]),
+        ("s2", 600.0, ["m2"]),
+    ],
+    CORR_SHAPES,
+)
+CORR_POINT = ResolvedLocation(edge_id="m3", pos_m=500, x=0, y=3500, approx=False, heading_deg=0)
+
+
+def _at(vid: str, edge: str, pos: float) -> VehicleState:
+    (x0, y0), (x1, y1) = CORR_SHAPES[edge][0], CORR_SHAPES[edge][-1]
+    f = pos / CORR.length_m[edge]
+    return VehicleState(
+        vehicle_id=vid,
+        x=x0 + (x1 - x0) * f,
+        y=y0 + (y1 - y0) * f,
+        edge_id=edge,
+        lane_pos_m=pos,
+        heading_deg=0.0 if edge.startswith("m") else 90.0,
+        speed_mps=12,
+    )
+
+
+def test_the_main_road_is_the_one_that_continues_straight() -> None:
+    from v2v.geocast.directional import _main_pred
+
+    assert _main_pred(CORR, "m2") == "m1"  # straight on, not the road turning in from the west
+    assert _main_pred(CORR, "m3") == "m2"
+    assert _main_pred(RoadGraph.from_edges([("a", 1.0, ["b"]), ("c", 1.0, ["b"])]), "b") is None
+
+
+def test_up_to_800_m_every_road_leading_in_counts_as_before() -> None:
+    from v2v.geocast.directional import side_reach
+
+    assert side_reach(800.0) is None and side_reach(800.1) == directional.SIDE_ROAD_M
+    zone = road_zone(CORR, CORR_POINT, 800, "backward")
+    assert zone == {
+        "m3": (0.0, 500.0),
+        "m2": (700.0, 1000.0),
+    }  # shorter than the roads: no corridor
+
+
+def test_beyond_800_m_the_main_road_runs_the_whole_radius_and_side_roads_stop() -> None:
+    zone = road_zone(CORR, CORR_POINT, 3000, "backward")
+    assert zone["m3"] == (0.0, 500.0)
+    assert zone["m2"] == (0.0, 1000.0) and zone["m1"] == (0.0, 1000.0)  # 500 + 1000 + 1000
+    assert zone["m0"] == (500.0, 1000.0)  # 500 + 1000 + 1000 + 500 = 3000: the last half
+    assert zone["s2"] == (100.0, 600.0)  # a side road joining the main road: 500 m of it
+    assert "s1" not in zone and "s0" not in zone  # and no further
+    # without the corridor the side road would have been followed for the whole radius
+    wide = CORR.upstream("m3", 500, 3000)
+    assert "s1" in wide and "s0" in wide
+
+
+def test_a_5_km_geocast_reaches_the_cars_in_the_way_and_not_the_side_streets_far_off() -> None:
+    cars = [
+        _at("same_road_2_km_back", "m1", 500),  # 500 + 1000 + 500 = 2000 m behind
+        _at("same_road_4_km_back", "m0", 100),  # 500 + 1000 + 1000 + 900 = 3400 m behind
+        _at("side_road_close", "s2", 300),  # 300 m up the side road: inside its 500 m
+        _at("side_road_far", "s0", 400),  # 600 + 900 + 500 = a long way up the side road
+        _at("ahead", "m3", 800),  # already past it
+    ]
+    kept = set(select_reach(CORR_POINT, cars, 5000, "backward", CORR))
+    assert kept == {"same_road_2_km_back", "same_road_4_km_back", "side_road_close"}

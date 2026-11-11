@@ -54,6 +54,8 @@ class _Sim:
     index: int
     config_name: str
     speed: float
+    radius_m: float | None = None
+    scripted: bool = True
     playing: bool = False
     status: str = "starting SUMO"
     session: LiveSession | None = None
@@ -68,6 +70,7 @@ class _Sim:
                     "index": self.index,
                     "config_name": self.config_name,
                     "speed": self.speed,
+                    "radius_m": self.radius_m,
                     "playing": self.playing,
                     "status": self.status,
                     "error": error,
@@ -80,7 +83,12 @@ class _Sim:
         self.state()
         if self.session is not None:
             self.session.close()
-        self.session = LiveSession(self.specs[self.index], config_name=self.config_name)
+        self.session = LiveSession(
+            self.specs[self.index],
+            config_name=self.config_name,
+            radius_m=self.radius_m,
+            scripted=self.scripted,
+        )
         self.session.open()
         self.playing = False
         self.conn.send(("reset", None))
@@ -172,6 +180,9 @@ class _Sim:
             self.status = "running" if self.playing else "paused"
         elif cmd == "voice":
             self.voice(*arg)
+        elif cmd == "radius":  # applies to the next report; nothing restarts
+            self.radius_m = float(arg)
+            session.radius_m = self.radius_m
         elif cmd == "speed":
             self.speed = float(arg)
         elif cmd == "reset":
@@ -211,9 +222,15 @@ class _Sim:
 
 
 def _serve(
-    conn: Connection, specs: list[ScenarioSpec], index: int, config_name: str, speed: float
+    conn: Connection,
+    specs: list[ScenarioSpec],
+    index: int,
+    config_name: str,
+    speed: float,
+    radius_m: float | None,
+    scripted: bool,
 ) -> None:
-    sim = _Sim(conn, specs, index, config_name, speed)
+    sim = _Sim(conn, specs, index, config_name, speed, radius_m, scripted)
     try:
         sim.run()
     except (EOFError, BrokenPipeError, ConnectionError):
@@ -241,6 +258,10 @@ class SimWorker:
     config_name: str = "proposed"
     speed: float = 1.0
     """Simulated seconds per real second."""
+    radius_m: float | None = None
+    """Geocast radius in metres (None: the config's own)."""
+    scripted: bool = True
+    """Fire the scenario's own reports; off for the sandbox."""
     playing: bool = False
     status: str = "starting SUMO"
     error: str | None = None
@@ -262,7 +283,15 @@ class SimWorker:
         self._conn = here
         self._proc = ctx.Process(
             target=_serve,
-            args=(there, self.specs, self.index, self.config_name, self.speed),
+            args=(
+                there,
+                self.specs,
+                self.index,
+                self.config_name,
+                self.speed,
+                self.radius_m,
+                self.scripted,
+            ),
             daemon=True,
             name="sumo",
         )

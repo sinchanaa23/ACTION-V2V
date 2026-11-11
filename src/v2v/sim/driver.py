@@ -304,6 +304,8 @@ class DriverSession:
 
     spec: ScenarioSpec
     config_name: str = "proposed"
+    radius_m: float | None = None
+    """Geocast radius in metres for spoken reports (see ``LiveSession.radius_m``)."""
     live: LiveSession = field(init=False)
     graph: RoadGraph = field(init=False)
     trails: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
@@ -311,7 +313,7 @@ class DriverSession:
     depart_s: float = 0.0
 
     def __post_init__(self) -> None:
-        self.live = LiveSession(self.spec, config_name=self.config_name)
+        self.live = LiveSession(self.spec, config_name=self.config_name, radius_m=self.radius_m)
         self.graph = road_graph(net_file(Path(self.spec.sumocfg)))
 
     def open(self) -> None:

@@ -36,6 +36,9 @@ warned needlessly against SUMO's ground truth:
 pip install -e ".[sim,sim3d]"
 python -m v2v.sim.world3d --corridor hebbal       # once: buildings, water, parks
 python dashboard/sim3d/app.py                    # --scenario noisy-low-s0 --config baseline_a
+# Driver sandbox (default): click a car to become it, say "hey ACTION" or press Enter and type a
+# report. Hazards are geocast (up to --radius km, default 5) to the cars that need them; anything
+# else is refused. Click other cars to see what they received. --scripted plays the dataset demo.
 ```
 
 It opens as a scroll-driven tour: the mouse wheel (or the arrow keys) glides the camera
