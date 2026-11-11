@@ -365,7 +365,14 @@ def input_device() -> int | str | None:
     choice = os.environ.get("V2V_MIC", "").strip()
     if not choice:
         return None
-    return int(choice) if choice.isdigit() else choice
+    device: int | str = int(choice) if choice.isdigit() else choice
+    try:  # a device that cannot do 16 kHz mono (common for WDM-KS) falls back to the default
+        import sounddevice
+
+        sounddevice.check_input_settings(device=device, channels=1, samplerate=RATE, dtype="int16")
+    except Exception:
+        return None
+    return device
 
 
 def list_inputs() -> list[str]:
