@@ -15,6 +15,7 @@ so it is tested without a microphone.
 import argparse
 import json
 import math
+import os
 import queue
 import threading
 import time
@@ -315,6 +316,7 @@ class Listener:
                 channels=1,
                 dtype="int16",
                 callback=capture,
+                device=input_device(),
             ):
                 self.phase = "waiting"
                 silent: deque[bool] = deque(maxlen=GATE_BLOCKS)
@@ -357,6 +359,25 @@ GATE_ADVICE = (
 )
 
 
+def input_device() -> int | str | None:
+    """The microphone to use: ``V2V_MIC`` (a device number or part of its name), else the
+    system default. Windows often lists several; the default is not always the one that works."""
+    choice = os.environ.get("V2V_MIC", "").strip()
+    if not choice:
+        return None
+    return int(choice) if choice.isdigit() else choice
+
+
+def list_inputs() -> list[str]:
+    import sounddevice
+
+    return [
+        f"{i:3d}  {d['name']}  ({sounddevice.query_hostapis(d['hostapi'])['name']})"
+        for i, d in enumerate(sounddevice.query_devices())
+        if d["max_input_channels"] > 0
+    ]
+
+
 def check(seconds: float = 8.0) -> int:
     """Record once from the default microphone and say what is wrong, if anything."""
     import sounddevice
@@ -370,7 +391,12 @@ def check(seconds: float = 8.0) -> int:
         chunks.append(bytes(data))
 
     with sounddevice.RawInputStream(
-        samplerate=RATE, blocksize=BLOCK_SAMPLES, channels=1, dtype="int16", callback=capture
+        samplerate=RATE,
+        blocksize=BLOCK_SAMPLES,
+        channels=1,
+        dtype="int16",
+        callback=capture,
+        device=input_device(),
     ):
         t0 = time.monotonic()
         while time.monotonic() - t0 < seconds:
@@ -406,9 +432,17 @@ def check(seconds: float = 8.0) -> int:
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="test the microphone and explain")
+    parser.add_argument("--devices", action="store_true", help="list the microphones")
+    parser.add_argument("--mic", help="microphone number or name for --check (or set V2V_MIC)")
     parser.add_argument("--download", action="store_true", help="fetch the speech models")
     parser.add_argument("--wav", type=Path, help="read a 16 kHz mono WAV instead of the mic")
     args = parser.parse_args(argv)
+    if args.mic:
+        os.environ["V2V_MIC"] = args.mic
+    if args.devices:
+        print("\n".join(list_inputs()))
+        print("\nTry one:  python -m v2v.voice.listener --check --mic <number>")
+        return
     if args.check:
         raise SystemExit(check())
     if args.download:
