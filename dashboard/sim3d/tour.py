@@ -172,14 +172,16 @@ def chapters(
     decks: int,
     distribution: str,
     radius_m: float,
+    sandbox: bool = False,
 ) -> list[Chapter]:
     """The tour for one scenario. Positions are Ursina (x, y-up, z) metres."""
     span = max(extent)
     deck = deck_focus or road_focus
     where = f" near {place}" if place else ""
+    reach = f"{radius_m / 1000:g} km" if radius_m >= 1000 else f"{radius_m:.0f} m"
     rule = {
-        "directional": f"only vehicles still heading towards it, within {radius_m:.0f} m upstream",
-        "circular": f"every vehicle within {radius_m:.0f} m",
+        "directional": f"only vehicles still heading towards it, within {reach} upstream",
+        "circular": f"every vehicle within {reach}",
         "broadcast": "every vehicle in radio reach, needed or not",
     }.get(distribution, distribution)
     return [
@@ -206,17 +208,23 @@ def chapters(
         ),
         Chapter(
             "hazard",
-            "The hazard",
-            f"A {hazard_name}{where}. Click it to see what the system knows,\n"
+            "Be a driver" if sandbox else "The hazard",
+            "Click any car to become it. Then say \u201chey ACTION\u201d, or press Enter and type,\n"
+            "what you see on the road ahead of you."
+            if sandbox
+            else f"A {hazard_name}{where}. Click it to see what the system knows,\n"
             "or press K to jump to the moment drivers report it.",
             Shot(hazard, road_axis - 38.0, 30.0, 300.0, 48.0),
         ),
         Chapter(
             "geocast",
-            "Geocast",
-            f"Warnings go to {rule}.\n"
+            "Warn the road" if sandbox else "Geocast",
+            f"A real hazard goes only to {rule}, up to {reach} back.\n"
+            "Anything else is not sent. Click a car to see what it received."
+            if sandbox
+            else f"Warnings go to {rule}.\n"
             "Each glowing hop is a real relay in the simulated radio network.",
-            Shot(hazard, road_axis + 14.0, 58.0, max(radius_m, 300.0) * 2.1, 44.0),
+            Shot(hazard, road_axis + 14.0, 58.0, min(max(radius_m, 300.0) * 2.1, span * 1.1), 44.0),
         ),
         Chapter(
             "explore",

@@ -26,6 +26,10 @@ from 69% to 45%, so legal loops stay in. The contract's ``VehicleState`` has
 no lane index, so every lane of a carriageway is covered; a lane block
 concerns the whole carriageway anyway, since its traffic must merge round it.
 
+Beyond 800 m the zone is a corridor rather than everything that could drive to
+the hazard (``side_reach``): the road it is on is followed back for the whole
+radius, up to 5 km in the demo, and roads joining it for 500 m only.
+
 Without a road map the heading rule stands in: a vehicle within radius R is
 kept when the hazard lies ahead of it (bearing within AHEAD_TOLERANCE_DEG of
 its heading; behind it for ``forward``) and it travels the hazard's way
@@ -38,12 +42,13 @@ against. Vehicles in the zone that will turn off before the hazard are the
 method's honest false positives.
 """
 
+import heapq
 import math
 import threading
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from functools import lru_cache
+from functools import cache, lru_cache
 from typing import Any, Literal
 
 from v2v.contracts import AssessedHazard, HazardType, ResolvedLocation, VehicleState
@@ -54,6 +59,8 @@ SAME_DIRECTION_DEG = 60.0
 OPPOSITE_DIRECTION_DEG = 135.0
 OPPOSITE_SEARCH_M = 60.0
 AT_HAZARD_M = 5.0
+CORRIDOR_ABOVE_M = 800.0
+SIDE_ROAD_M = 500.0
 
 Reach = Literal["backward", "forward", "bidirectional"]
 REACHES: tuple[Reach, ...] = ("backward", "forward", "bidirectional")
@@ -67,6 +74,19 @@ REACH_BY_HAZARD: dict[HazardType, Reach] = {
 }
 
 Point = tuple[float, float]
+
+
+def side_reach(radius_m: float) -> float | None:
+    """How far side roads and ramps are followed, or None for no limit.
+
+    Up to 800 m (what the experiments use) every road leading to the hazard
+    within the radius counts. On a road network that loops back on
+    itself, a radius of several kilometres would then reach nearly every
+    vehicle, since almost any of them *could* drive to the hazard (at 5 km, 242
+    of 245 vehicles were addressed while 9 would pass it). Beyond 800 m the
+    geocast is therefore a corridor: the road the hazard is on is followed back
+    for the whole radius, and a road joining it is followed for SIDE_ROAD_M only."""
+    return None if radius_m <= CORRIDOR_ABOVE_M else SIDE_ROAD_M
 
 
 def reach_for(hazard: HazardType) -> Reach:
@@ -118,6 +138,15 @@ class RoadGraph:
         distance from that edge's *end* to the point, up to ``max_m``. The
         point's own edge is not included."""
         return dict(_upstream(self, edge_id, round(pos_m, 1), max_m))
+
+    def corridor(
+        self, edge_id: str, pos_m: float, max_m: float, side_m: float
+    ) -> dict[str, tuple[float, float]]:
+        """Like ``upstream``, but only the road the point is on is followed for the
+        whole ``max_m``; a road that joins it is followed for ``side_m``. Each edge
+        maps to (driving distance from its end to the point, metres of it, counted
+        back from its end, that are inside the corridor)."""
+        return dict(_corridor(self, edge_id, round(pos_m, 1), max_m, side_m))
 
     def downstream(self, edge_id: str, pos_m: float, max_m: float) -> dict[str, float]:
         """Edges reachable from ``(edge_id, pos_m)``, each mapped to the driving
@@ -185,6 +214,66 @@ def _upstream(
     return tuple(to_point.items())
 
 
+@cache
+def _main_pred(graph: RoadGraph, edge: str) -> str | None:
+    """The road ``edge`` continues, among the edges leading into it: the one that
+    meets it with the smallest change of direction. None when that cannot be told
+    (no road shapes), in which case every edge counts as the main road."""
+    preds = graph.incoming.get(edge, ())
+    if len(preds) < 2:
+        return preds[0] if preds else None
+    shape = graph.shapes.get(edge)
+    if not shape or len(shape) < 2:
+        return None
+    start = bearing_deg(*shape[0], *shape[1])
+    best: tuple[float, str] | None = None
+    for pred in preds:
+        ps = graph.shapes.get(pred)
+        if not ps or len(ps) < 2:
+            return None
+        turn = angle_diff(bearing_deg(*ps[-2], *ps[-1]), start)
+        if best is None or turn < best[0]:
+            best = (turn, pred)
+    return None if best is None else best[1]
+
+
+@lru_cache(maxsize=256)
+def _corridor(
+    graph: RoadGraph, edge_id: str, pos_m: float, max_m: float, side_m: float
+) -> tuple[tuple[str, tuple[float, float]], ...]:
+    # Dijkstra backwards with a side-road budget: the main road has an unlimited one,
+    # a road joining it starts with side_m, and every edge walked spends its length.
+    dist_of: dict[str, float] = {}
+    reach_of: dict[str, float] = {}
+    best_budget: dict[str, float] = {}
+    counter = 0
+    frontier: list[tuple[float, int, str, float]] = []
+
+    def push(dist: float, edge: str, via: str, budget: float) -> None:
+        nonlocal counter
+        main = _main_pred(graph, via)
+        for prev in graph.incoming.get(via, ()):
+            inherited = math.inf if (main is None or prev == main) and budget == math.inf else None
+            if inherited is None:  # leaving the main road, or already on a side road
+                inherited = side_m if budget == math.inf else budget - graph.length_m.get(via, 0.0)
+            counter += 1
+            heapq.heappush(frontier, (dist, counter, prev, inherited))
+
+    push(pos_m, edge_id, edge_id, math.inf)
+    while frontier:
+        dist, _, edge, budget = heapq.heappop(frontier)
+        if dist > max_m or edge == edge_id or budget <= 0:
+            continue
+        if budget <= best_budget.get(edge, 0.0):
+            continue  # reached before, no later, with at least this much budget
+        best_budget[edge] = budget
+        length = graph.length_m.get(edge, 0.0)
+        dist_of[edge] = min(dist, dist_of.get(edge, math.inf))
+        reach_of[edge] = max(reach_of.get(edge, 0.0), min(length, max_m - dist, budget))
+        push(dist + length, edge_id, edge, budget)
+    return tuple((e, (dist_of[e], reach_of[e])) for e in dist_of)
+
+
 @lru_cache(maxsize=256)
 def _downstream(
     graph: RoadGraph, edge_id: str, pos_m: float, max_m: float
@@ -218,7 +307,9 @@ def _merge(zone: Zone, edge: str, lo: float, hi: float) -> None:
 
 
 def road_zone(graph: RoadGraph, loc: ResolvedLocation, radius_m: float, reach: Reach) -> Zone:
-    """The stretches of road a geocast in direction ``reach`` covers."""
+    """The stretches of road a geocast in direction ``reach`` covers (a corridor
+    beyond 800 m, see ``side_reach``)."""
+    side = side_reach(radius_m)
     zone: Zone = {}
     points = [(loc.edge_id, loc.pos_m)]
     if reach == "bidirectional":
@@ -233,9 +324,14 @@ def road_zone(graph: RoadGraph, loc: ResolvedLocation, radius_m: float, reach: R
                 _merge(zone, nxt, 0.0, min(graph.length_m[nxt], radius_m - d))
         else:
             _merge(zone, edge, max(0.0, pos - radius_m), pos)
-            for prev, d in graph.upstream(edge, pos, radius_m).items():
-                full = graph.length_m[prev]
-                _merge(zone, prev, max(0.0, full - (radius_m - d)), full)
+            if side is None:
+                for prev, d in graph.upstream(edge, pos, radius_m).items():
+                    full = graph.length_m[prev]
+                    _merge(zone, prev, max(0.0, full - (radius_m - d)), full)
+            else:
+                for prev, (_, within) in graph.corridor(edge, pos, radius_m, side).items():
+                    full = graph.length_m[prev]
+                    _merge(zone, prev, max(0.0, full - within), full)
     return zone
 
 

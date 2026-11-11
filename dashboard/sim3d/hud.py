@@ -23,6 +23,10 @@ AMBER = (1.0, 0.78, 0.3)
 MUTED = (0.56, 0.62, 0.7)
 FAINT = (0.36, 0.41, 0.48)
 WHITE = (0.93, 0.95, 0.98)
+YOU = (1.0, 0.86, 0.25)
+"""The car you are."""
+RADII = ((800.0, "0.8 km"), (2000.0, "2 km"), (5000.0, "5 km"))
+"""The geocast radii the controls offer."""
 
 GLASS = color.rgba(0.03, 0.045, 0.07, 0.72)
 RIM = color.rgba(0.6, 0.85, 1.0, 0.13)
@@ -279,7 +283,7 @@ class Dock:
         self.mic_b = button(p, "Voice", 0.39, -0.01, 0.09, 0.032, actions["mic"])
         self.type_b = button(p, "Type", 0.49, -0.01, 0.09, 0.032, actions["type"])
 
-        self.panel = Glass(-a / 2 + m, -0.5 + m + 0.31, 0.6, 0.25)
+        self.panel = Glass(-a / 2 + m, -0.5 + m + 0.354, 0.6, 0.294)
         q = self.panel
         x, y = 0.022, -0.02
         label(q, faint(spaced("speed")), x, y - 0.006, 0.5)
@@ -313,6 +317,15 @@ class Dock:
         button(q, "«", 0.11, y, 0.03, 0.028, actions["prev_config"])
         self.config_l = label(q, " ", 0.15, y - 0.004, 0.66)
         button(q, "»", 0.55, y, 0.03, 0.028, actions["next_config"])
+        y -= 0.044
+        label(q, faint(spaced("geocast")), x, y - 0.006, 0.5)
+        self.radius_bs: list[tuple[float, Button]] = []
+        bx = 0.11
+        for metres, text in RADII:
+            b = button(q, text, bx, y, 0.075, 0.028, lambda m_=metres: actions["radius"](m_))  # type: ignore[misc]
+            self.radius_bs.append((metres, b))
+            bx += 0.082
+        label(q, faint("how far back a hazard warning goes"), bx + 0.01, y - 0.006, 0.5)
         y -= 0.05
         self.track_x, self.track_w, self.track_y = x, 0.6 - 2 * x, y - 0.006
         self.track = Entity(
@@ -378,6 +391,10 @@ class Dock:
     def highlight(self, active: int | None) -> None:
         for i, b in enumerate(self.speed_bs):
             b.color = BTN_ON if i == active else BTN
+
+    def highlight_radius(self, radius_m: float | None) -> None:
+        for metres, b in self.radius_bs:
+            b.color = BTN_ON if radius_m is not None and abs(metres - radius_m) < 1 else BTN
 
 
 class Hud:
@@ -478,6 +495,17 @@ class Hud:
             " ", parent=ui, origin=(0, 0), position=(0, vy - 0.062), scale=0.48, enabled=False
         )
 
+        # the guide: always says what to do next
+        self.guide = Text(
+            " ", parent=ui, position=(-a / 2 + m, 0.5 - m - 0.088), origin=(-0.5, 0.5), scale=0.72
+        )
+        # the notice: what became of the last report, big and plain
+        self.notice_box = Glass(-0.47, 0.5 - m - 0.13, 0.84, 0.14, parent=ui)
+        self.notice_title = label(self.notice_box, " ", 0.026, -0.02, 1.2)
+        self.notice_text = label(self.notice_box, " ", 0.026, -0.064, 0.7, line_height=1.35)
+        self.notice_box.enabled = False
+        self.notice_until = 0.0
+
         # the typed-report box: always works, whatever the microphone does
         self.type_box = Glass(-0.34, -0.5 + m + 0.23, 0.68, 0.058, parent=ui)
         self.type_text = label(self.type_box, " ", 0.02, -0.016, 0.8)
@@ -489,6 +517,24 @@ class Hud:
             " ", parent=ui, origin=(0, 0.5), position=(0, 0.5 - m - 0.004), scale=0.66
         )
         self.toast_until = 0.0
+
+    def set_guide(self, step: int, text: str) -> None:
+        """The one thing to do next, numbered."""
+        self.guide.text = tint(CYAN, f"{step}") + "   " + tint(WHITE, text) if step else muted(text)
+        self.guide.enabled = self.shown
+
+    def show_notice(
+        self, title: str, lines: Sequence[str], rgb: tuple[float, float, float], seconds: float
+    ) -> None:
+        """A big, plain statement of what the system did with a report."""
+        self.notice_title.text = tint(rgb, title)
+        self.notice_text.text = "\n".join(lines)
+        self.notice_box.resize(0.84, 0.082 + 0.032 * len(lines))
+        self.notice_box.enabled = self.shown
+        self.notice_until = time.perf_counter() + seconds
+
+    def hide_notice(self) -> None:
+        self.notice_box.enabled = False
 
     def report_box(self, active: bool, text: str) -> None:
         """The box for typing a report: shown while ``active``, with a blinking cursor."""
@@ -555,6 +601,8 @@ class Hud:
         self.root.enabled = shown
         self.dock.pill.enabled = shown
         self.dock.panel.enabled = shown and self.dock.open
+        self.guide.enabled = shown
+        self.notice_box.enabled = shown and time.perf_counter() < self.notice_until
         if not shown:
             self.card.hide()
 

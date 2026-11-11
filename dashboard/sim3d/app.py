@@ -44,6 +44,7 @@ from hud import (
     ORANGE,
     RED,
     WHITE,
+    YOU,
     Hud,
     faint,
     muted,
@@ -84,9 +85,10 @@ from ursina.shaders import unlit_shader
 from voice_proc import VoiceHandle
 from worker import FiredEvent, SimWorker, Snapshot
 
+from v2v.contracts import NON_HAZARD_TYPES
 from v2v.experiments import CONFIGS
+from v2v.geocast import directional
 from v2v.sim.delivery import DEFAULT_MODEL
-from v2v.sim.driver import verdict
 from v2v.sim.live import ORIGIN, WarningEvent, scenario_specs
 from v2v.sim.osm_network import CORRIDORS
 from v2v.sim.world3d import Scene, build_scene, context_paths
@@ -94,6 +96,8 @@ from v2v.voice.listener import models_ready
 
 CORRIDOR = CORRIDORS["hebbal"]
 NET_DIR = REPO / "sim_out" / "networks" / CORRIDOR.name
+WARM_UP_S = 240.0
+"""Sandbox start: simulated seconds to run first, so the road is already busy."""
 SCENARIO_DIR = REPO / "sim_out" / "scenarios" / CORRIDOR.name
 SPEEDS = (0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0)
 CONFIG_NAMES = tuple(CONFIGS)
@@ -281,9 +285,9 @@ class Car:
         self.paint = RED if blocking else paint_for(vid)
         self.body = instance(model, tint_to=rgba(self.paint), double_sided=True)
         self.body.collider = BoxCollider(
-            self.body, center=Vec3(0, 0.8, 0), size=Vec3(2.6, 2.2, 5.4)
-        )
-        self.body.on_click = lambda: view.select(("vehicle", vid))
+            self.body, center=Vec3(0, 1.2, 0), size=Vec3(4.6, 4.0, 8.0)
+        )  # a generous target: cars are small on screen
+        self.body.on_click = lambda: view.click_car(vid)
         # not children of the body: a child's tint would be multiplied by the car's paint
         self.marker = additive(instance(view.beam_mesh, shader=unlit_shader))
         self.marker.enabled = False
@@ -439,10 +443,21 @@ class Wave:
 
 class SimView(Entity):
     def __init__(
-        self, worker: SimWorker, world: Scene, origin: tuple[float, float], hud: Hud, rig: CameraRig
+        self,
+        worker: SimWorker,
+        world: Scene,
+        origin: tuple[float, float],
+        hud: Hud,
+        rig: CameraRig,
+        sandbox: bool = False,
     ) -> None:
         super().__init__()
         self.worker, self.world, self.origin, self.hud, self.rig = worker, world, origin, hud, rig
+        self.sandbox = sandbox
+        """Only drivers report: no scripted reports and no scenario hazard marker."""
+        self.me: str | None = None
+        """The car you became (clicked first); the one that speaks."""
+        self._glided = False
         self.lanes = lanes_by_edge(world)
         self.car_model = car_mesh()
         self.beam_mesh = beam()
@@ -532,7 +547,8 @@ class SimView(Entity):
             buildings=sum(1 for a in world.areas if a.kind == "building"),
             decks=len(raised),
             distribution=cfg.distribution,
-            radius_m=cfg.radius_m,
+            radius_m=self.worker.radius_m or cfg.radius_m,
+            sandbox=self.sandbox,
         )
 
     # --- hazard and zones --------------------------------------------------------------
@@ -542,6 +558,7 @@ class SimView(Entity):
             collider="box", model="cube", scale=(16, 16, 16), color=color.clear, shader=unlit_shader
         )
         self.hazard.on_click = lambda: self.select(("hazard",))
+        self.hazard.enabled = not self.sandbox  # nothing to click on in the sandbox
         self.core = Entity(
             model="cube", shader=unlit_shader, scale=2.4, color=rgba(RED), rotation=(45, 0, 45)
         )
@@ -582,6 +599,8 @@ class SimView(Entity):
         self.missed.clear()
         self.reporters.clear()
         self.rig.follow = None
+        self.me = None
+        self.hud.hide_notice()
         self.chapters = self.tour_chapters()
         self.rig.shots = [c.shot for c in self.chapters]
         self.select(None)
@@ -635,14 +654,16 @@ class SimView(Entity):
         self.bubble.position = sender + Vec3(0, 14, 0)
         self.bubble.enabled = True
         self.bubble_until = time.perf_counter() + 3.5
+        if e.spoken:
+            self.hud.toast.text = " "
+            title, lines, rgb = self.spoken_notice(e)
+            self.hud.show_notice(title, lines, rgb, 14.0)
         if not e.sent:
-            self.toast(
-                self.spoken_summary(e)
-                if e.spoken
-                else tint(AMBER, f"{e.slot.role.capitalize()} report at {e.t_s:.0f} s held back")
-                + muted(f"  ·  {r.assessed.status}, no warning sent"),
-                8.0 if e.spoken else 6.0,
-            )
+            if not e.spoken:
+                self.toast(
+                    tint(AMBER, f"{e.slot.role.capitalize()} report at {e.t_s:.0f} s held back")
+                    + muted(f"  ·  {r.assessed.status}, no warning sent")
+                )
             return
         self.show_zone(e)
         self.waves.append(Wave(self, sender, DEFAULT_MODEL.comm_range_m, CYAN, 1.8, 0.5))
@@ -676,11 +697,11 @@ class SimView(Entity):
             )
         self.missed = set(e.missed)
         if e.spoken:
-            self.toast(
-                self.spoken_summary(e) + faint(f"  ·  {len(e.delivered)} drivers warned"), 9.0
-            )
             # the hazard is where the driver is: fly there, not to the scenario's
-            self.rig.fly_to(self.u(*e.centre_xy, 0.0), max(e.radius_m * 0.85, 420.0), 50.0)
+            self.rig.follow = None
+            self.rig.fly_to(
+                self.u(*e.centre_xy, 0.0), min(max(e.radius_m * 0.3, 450.0), 1800.0), 52.0
+            )
             return
         self.toast(
             (tint(RED, "False alarm  ·  ") if e.false_alarm else "")
@@ -692,33 +713,111 @@ class SimView(Entity):
         if self.rig.mode == "tour" and time.perf_counter() - self.rig.scrolled_at > 3.0:
             self.rig.scroll.go(next(i for i, c in enumerate(self.chapters) if c.key == "geocast"))
 
-    def spoken_summary(self, e: WarningEvent) -> str:
-        """What the driver said, and whether it was safe to send."""
-        word, why = verdict(e)
-        colour = {"Confirmed": GREEN, "Sent as unverified": AMBER, "Blocked": RED}[word]
-        return muted(f"“{e.text}”   ") + tint(colour, word) + muted(f"  ·  {why}")
+    def spoken_notice(self, e: WarningEvent) -> tuple[str, list[str], tuple[float, float, float]]:
+        """The banner for a report: what it was taken to be, and what was done."""
+        i, a = e.result.interpretation, e.result.assessed
+        said = f"\u201c{e.text}\u201d"
+        kind = i.hazard.value.replace("_", " ")
+        if e.sent:
+            others = [
+                v
+                for v in (e.result.warning.recipients if e.result.warning else ())
+                if v != e.slot.reporter_id
+            ]
+            reached = [v for v in e.delivered if v != e.slot.reporter_id]
+            km = e.radius_m / 1000
+            where = {
+                "backward": "the cars approaching this spot",
+                "bidirectional": "the cars approaching from both directions",
+                "forward": "the cars ahead",
+            }.get(directional.reach_for(a.hazard), "the cars in the zone")
+            note = "" if a.status == "corroborated" else "  (unverified: nothing backs it up yet)"
+            return (
+                f"HAZARD REPORTED: {kind.upper()}",
+                [
+                    f"{said}  is being geocast to {where}, up to {km:g} km back.",
+                    (
+                        f"{len(others)} cars addressed, {len(reached)} reached{note}."
+                        if others
+                        else "No cars are behind you on this road right now: nobody to warn yet."
+                    ),
+                    "Click any car to see exactly what it received.",
+                ],
+                CYAN if a.status == "corroborated" else AMBER,
+            )
+        if i.negated:
+            title, line = (
+                "NOT GEOCAST: NO HAZARD",
+                "You said the hazard is not there, so there is nothing to warn about.",
+            )
+        elif i.hazard in NON_HAZARD_TYPES:
+            title, line = (
+                "NOT A HAZARD MESSAGE",
+                "Nothing in it is about a road hazard, so it is NOT being geocast.",
+            )
+        else:
+            title = "NOT GEOCAST: TOO UNCERTAIN"
+            line = f"It sounds like a {kind}, but not certain enough to warn other drivers."
+        return (
+            title,
+            [
+                f"{said}",
+                line,
+                "Try again, e.g. \u201croad pe gaddha hai\u201d or \u201caccident hua hai\u201d.",
+            ],
+            RED,
+        )
+
+    def click_car(self, vid: str) -> None:
+        """First click: become that car. After that, a click shows what that car received."""
+        if self.me is None or self.me not in self.cars:
+            self.become(vid)
+        else:
+            self.select(("vehicle", vid))
+
+    def become(self, vid: str) -> None:
+        car = self.cars.get(vid)
+        if car is None:
+            return
+        self.me = vid
+        self.select(("vehicle", vid))
+        self.rig.explore()
+        self.rig.follow = car.body  # a chase view from above, so you see the road around you
+        f = self.rig.free
+        self.rig.free = Shot(f.focus, f.yaw, 32.0, 110.0, f.fov)
+        self.toast(
+            tint(YOU, f"You are {vid}.")
+            + muted("  Say \u201chey ACTION\u201d or press Enter to report what you see."),
+            7.0,
+        )
+
+    def release(self) -> None:
+        self.me = None
+        self.rig.follow = None
+        self.toast(muted("You let go. Click a car to become it."), 4.0)
+
+    def fly_to_car(self, vid: str) -> None:
+        car = self.cars.get(vid)
+        if car is not None:
+            self.rig.follow = None
+            self.rig.fly_to(car.body.position, 140.0, 38.0)
 
     def voice_vehicle(self) -> str | None:
-        """Who speaks: the selected vehicle, else the one nearest the hazard (touring) or
-        nearest where the camera looks (exploring)."""
+        """Who speaks: the car you became, else the selected one."""
+        if self.me in self.cars:
+            return self.me
         sel = self.selected
         if sel and sel[0] == "vehicle" and sel[1] in self.cars and not self.cars[sel[1]].blocking:
             return sel[1]
-        # touring: where the action is (the hazard); exploring: wherever you are looking
-        focus = Vec3(*self.rig.pose.focus) if self.rig.mode == "explore" else self.hazard_pos
-        near = min(
-            (c for c in self.cars.values() if not c.blocking),
-            key=lambda c: (c.body.position - focus).length(),
-            default=None,
-        )
-        return near.vid if near is not None else None
+        return None
 
     def submit_voice(self, roman: str) -> None:
-        """A spoken report from the speaking vehicle, through the real pipeline."""
+        """A spoken or typed report from the car you are, through the real pipeline."""
         vid = self.voice_vehicle()
         if vid is None:
-            self.toast(tint(AMBER, "No vehicle on the road yet to speak as. Press space to play."))
+            self.toast(tint(AMBER, "Click a car first: you speak as the car you click."))
             return
+        self.me = vid
         self.worker.send("voice", (vid, roman))
         self.toast(muted(f"{vid}:  ") + tint(WHITE, f"“{roman}”") + muted("   checking…"), 5.0)
 
@@ -731,10 +830,32 @@ class SimView(Entity):
             phase, words, level, error = v.phase, v.words, v.level, v.error
         else:
             phase, words, level, error = "off", "", 0.0, None
+        self.refresh_guide()
         gated = self.voice is not None and self.voice.gated and self.voice_override is None
         vehicle = self.voice_vehicle() if phase != "off" else None
         self.hud.voice(phase, words, level, vehicle, error, gated)
         self.hud.report_box(self.typing, self.typed)
+
+    def refresh_guide(self) -> None:
+        events = [e for e in self.worker.events() if e.spoken]
+        km = (self.worker.radius_m or CONFIGS[self.worker.config_name].radius_m) / 1000
+        if self.me is None:
+            self.hud.set_guide(1, "Click a car to become it")
+        elif not events:
+            self.hud.set_guide(
+                2,
+                f"You are {self.me}. Say \u201chey ACTION\u201d or press Enter, and report what you see",
+            )
+        elif events[-1].sent:
+            self.hud.set_guide(
+                3,
+                f"Click the cars behind you to see what they received  \u00b7  geocast {km:g} km  \u00b7  Enter reports again",
+            )
+        else:
+            self.hud.set_guide(
+                2,
+                f"Not sent. You are still {self.me}: try a hazard, e.g. \u201croad pe gaddha hai\u201d",
+            )
 
     def begin_typing(self) -> None:
         """Open the box for typing a report (Enter): works with or without a microphone."""
@@ -796,6 +917,8 @@ class SimView(Entity):
 
     def status_colour(self, vid: str) -> tuple[tuple[float, float, float] | None, str]:
         snap = self.snap
+        if vid == self.me:
+            return YOU, "you"
         if vid in self.reporters:
             return ORANGE, "reporter"
         if vid in self.warned_needed:
@@ -839,15 +962,22 @@ class SimView(Entity):
                 fx.destroy()
                 self.pulses.remove(fx)
         self.waves = [w for w in self.waves if not w.update(now)]
-        active = snap is not None and snap.event_active
+        active = snap is not None and snap.event_active and not self.sandbox
         pulse = 0.5 + 0.5 * math.sin(now * 3)
         self.core.rotation_y += 50 * dt
         self.core.enabled = active
+        for e in (self.column, self.beacon_ring):
+            e.enabled = not self.sandbox
         paint(self.column, rgba(RED, 0.25 + 0.3 * pulse) if active else rgba(MUTED, 0.12))
         self.beacon_ring.scale = 1 + 0.25 * pulse if active else 1
         self.beacon_ring.color = rgba(RED, 0.5 + 0.4 * pulse) if active else rgba(MUTED, 0.3)
         hazard_on = self.selected == ("hazard",)
         self.sensor.enabled = self.sensor_rim.enabled = active and hazard_on
+        if self.hud.notice_box.enabled and now > self.hud.notice_until:
+            self.hud.hide_notice()
+        if self.sandbox and not self._glided and self.worker.status == "running":
+            self._glided = True  # the sandbox opens on a busy road, ready for the first click
+            self.rig.scroll.go(next(i for i, c in enumerate(self.chapters) if c.key == "hazard"))
         for car in self.cars.values():
             if car.blocking:
                 car.halo.enabled = True
@@ -881,7 +1011,7 @@ class SimView(Entity):
         self.snap = snap
         seen = set()
         sel = self.selected[1] if self.selected and self.selected[0] == "vehicle" else None
-        for group, blocking in ((snap.vehicles, False), (snap.blocking, True)):
+        for group, blocking in ((snap.vehicles, False), (snap.blocking, not self.sandbox)):
             for vid, v in group.items():
                 seen.add(vid)
                 car = self.cars.get(vid)
@@ -893,6 +1023,9 @@ class SimView(Entity):
         for vid in [v for v in self.cars if v not in seen]:
             if self.rig.follow is self.cars[vid].body:
                 self.rig.follow = None
+            if vid == self.me:
+                self.me = None
+                self.toast(tint(AMBER, f"{vid} has left the road. Click another car to become it."))
             self.cars.pop(vid).destroy()
 
     # --- interface -------------------------------------------------------------------------
@@ -942,6 +1075,7 @@ class SimView(Entity):
             dock.scenario_l.text = f"{spec.condition} · {spec.density} traffic · seed {spec.seed}"
             dock.config_l.text = f"{cfg.name}  {faint(cfg.distribution)}"
             dock.highlight(SPEEDS.index(w.speed) if w.speed in SPEEDS else None)
+            dock.highlight_radius(w.radius_m)
             dock.truth_b.color = (
                 rgba(CYAN, 0.3) if self.ground_truth else color.rgba(1, 1, 1, 0.045)
             )
@@ -993,6 +1127,8 @@ class SimView(Entity):
         role = (
             "hazard vehicle, blocking a lane"
             if vid in snap.blocking
+            else "you"
+            if vid == self.me
             else "reporter"
             if vid in self.reporters
             else "vehicle"
@@ -1002,12 +1138,56 @@ class SimView(Entity):
             f"{muted('speed')}  {v.speed_mps * 3.6:.0f} km/h      {muted('heading')}  {v.heading_deg:.0f}° {cardinal(v.heading_deg)}",
             f"{muted('road')}  {v.edge_id}"
             + (muted(f"   ·   on a flyover, {height:.0f} m up") if height > 1 else ""),
-            f"{muted('to hazard')}  {math.dist((v.x, v.y), (spec.hazard.x, spec.hazard.y)):.0f} m in a straight line",
-            f"{muted('ground truth')}  "
-            + (tint(RED, "will reach the hazard") if vid in snap.relevant else "will not reach it"),
         ]
+        if not self.sandbox:  # the scenario's own hazard exists only in the scripted demo
+            lines += [
+                f"{muted('to hazard')}  {math.dist((v.x, v.y), (spec.hazard.x, spec.hazard.y)):.0f} m in a straight line",
+                f"{muted('ground truth')}  "
+                + (
+                    tint(RED, "will reach the hazard")
+                    if vid in snap.relevant
+                    else "will not reach it"
+                ),
+            ]
+        spoken = [e for e in events if e.spoken]
         mine = [e for e in events if e.result.warning and vid in e.result.warning.recipients]
-        if mine:
+        sent = [e for e in spoken if e.sent]
+        if vid == self.me and spoken:
+            e = spoken[-1]
+            lines.append(tint(YOU, "your report:  ") + f"\u201c{e.text}\u201d")
+            lines.append(
+                tint(GREEN, "geocast to the road behind you")
+                if e.sent
+                else tint(RED, "not geocast: not a hazard message")
+            )
+        elif sent:
+            e = sent[-1]
+            back = math.dist((v.x, v.y), e.centre_xy)
+            got = e.delivered.get(vid)
+            addressed = vid in (e.result.warning.recipients if e.result.warning else ())
+            if addressed and got is not None:
+                kind = e.result.interpretation.hazard.value.replace("_", " ")
+                hop = e.outcome.hops.get(vid, "?") if e.outcome else "?"
+                lines.append(
+                    tint(
+                        CYAN,
+                        f"RECEIVED: {kind.upper()} AHEAD, {back:.0f} m from {e.slot.reporter_id}",
+                    )
+                )
+                lines.append(f"\u201c{e.text}\u201d")
+                lines.append(faint(f"in {got:.0f} ms, hop {hop}"))
+            elif addressed:
+                lines.append(tint(ORANGE, "addressed, but the radio never got it through"))
+            else:
+                lines.append(
+                    tint(
+                        MUTED,
+                        f"nothing received: {back:.0f} m from the report, not on the road leading to it",
+                    )
+                )
+        elif spoken:
+            lines.append(tint(MUTED, "nothing received: the last report was not a hazard"))
+        elif mine:
             e = mine[-1]
             got = e.delivered.get(vid)
             if got is not None and e.outcome is not None:
@@ -1030,7 +1210,8 @@ class SimView(Entity):
             tint(rgb or MUTED, spaced(role)),
             vid,
             "\n".join(lines),
-            actions=[("Stop following" if following else "Follow", self.toggle_follow)],
+            actions=[("Stop following" if following else "Follow", self.toggle_follow)]
+            + ([] if vid == self.me else [("Become this car", lambda: self.become(vid))]),
         )
 
     def hazard_card(self, events: list[WarningEvent]) -> None:
@@ -1211,7 +1392,25 @@ def main() -> None:
         "--no-bloom", action="store_true", help="skip the glow filter (slower GPUs)"
     )
     parser.add_argument(
-        "--speed", type=float, default=4.0, choices=SPEEDS, help="simulated seconds per second"
+        "--speed",
+        type=float,
+        choices=SPEEDS,
+        help="simulated seconds per second (default 1 as a driver, 4 on the scripted tour)",
+    )
+    parser.add_argument(
+        "--scripted",
+        action="store_true",
+        help="play the dataset's scripted reports and hazard instead of the driver sandbox",
+    )
+    parser.add_argument(
+        "--radius", type=float, default=5.0, help="geocast radius in km (default 5)"
+    )
+    parser.add_argument(
+        "--become", help="with --screenshot: 'auto' or a vehicle id to become, first"
+    )
+    parser.add_argument(
+        "--inspect",
+        help="with --screenshot: after a geocast, open the card of 'recipient' or 'bystander'",
     )
     parser.add_argument(
         "--screenshot", type=Path, help="save one frame and quit (for docs and checks)"
@@ -1289,10 +1488,13 @@ def main() -> None:
         bloom(app)
 
     names = [Path(s.sumocfg).parent.name for s in specs]
+    first = args.scenario or ("" if args.scripted else "clean-high-s0")
     worker = SimWorker(
         specs,
-        index=names.index(args.scenario) if args.scenario in names else 0,
+        index=names.index(first) if first in names else 0,
         config_name=args.config,
+        radius_m=args.radius * 1000.0,
+        scripted=args.scripted,
     )
     worker.start()
     voice = VoiceHandle()
@@ -1322,6 +1524,12 @@ def main() -> None:
             "config",
             CONFIG_NAMES[(CONFIG_NAMES.index(worker.config_name) + step) % len(CONFIG_NAMES)],
         )
+
+    def set_radius(metres: float) -> None:
+        worker.radius_m = float(metres)
+        run("radius", float(metres))
+        view.toast(muted(f"Next hazard is geocast up to {metres / 1000:g} km back."), 4.0)
+        view._hud_at = 0
 
     def toggle_truth() -> None:
         view.ground_truth = not view.ground_truth
@@ -1360,13 +1568,16 @@ def main() -> None:
             setattr(rig, "scrolled_at", time.perf_counter()),
         ),
         "deselect": lambda: view.select(None),
+        "radius": set_radius,
     }
     hud = Hud(actions, SPEEDS, 6)
-    view = SimView(worker, world, origin, hud, rig)
+    view = SimView(worker, world, origin, hud, rig, sandbox=not args.scripted)
     view.voice = voice
     rig.pose = rig.free = rig.shots[0]
     rig.on_mode = lambda: setattr(view, "_hud_at", 0)
-    run("speed", args.speed)
+    run("speed", args.speed or (4.0 if args.scripted else 1.0))
+    if not args.scripted and args.screenshot is None:
+        run("until", WARM_UP_S)  # open on a road that already has traffic
 
     class Keys(Entity):
         def input(self, key: str) -> None:
@@ -1408,6 +1619,8 @@ def main() -> None:
                 actions["chapter"](round(rig.scroll.target) + step)
             elif key == "escape":
                 view.select(None)
+            elif key == "x":
+                view.release()
             elif key == "f11":
                 window.fullscreen = not window.fullscreen
 
@@ -1440,6 +1653,7 @@ def main() -> None:
                 )
                 self.saved = False
                 self.said = False
+                self.inspected = False
                 if args.mic_preview:
                     view.voice_override = ("listening", args.mic_preview, 0.5)
                 if args.type_preview:
@@ -1447,13 +1661,38 @@ def main() -> None:
 
             def update(self) -> None:
                 now = time.perf_counter()
-                if args.say and not self.said and now - self.started > 6.0 and view.cars:
+                if (
+                    args.become
+                    and view.me is None
+                    and not self.said
+                    and view.cars
+                    and worker.status == "running"
+                ):
+                    pick = args.become if args.become in view.cars else sorted(view.cars)[0]
+                    view.become(pick)
+                if (
+                    args.say
+                    and not self.said
+                    and view.cars
+                    and worker.status == "running"
+                    and (not args.become or view.me)
+                ):
                     self.said = True
                     view.submit_voice(args.say)
                 if args.select and args.select != "hazard" and view.selected is None:
                     view.select(("vehicle", args.select))
                 if args.select == "hazard":
                     view.hazard_tab = args.tab
+                if args.inspect and not self.inspected:
+                    evs = [e for e in worker.events() if e.spoken and e.sent]
+                    if evs:
+                        e = evs[-1]
+                        got = [v for v in e.delivered if v != e.slot.reporter_id and v in view.cars]
+                        rest = [v for v in view.cars if v not in e.delivered and v != view.me]
+                        pool = got if args.inspect == "recipient" else rest
+                        if pool:
+                            self.inspected = True
+                            view.select(("vehicle", pool[len(pool) // 2]))
                 if self.shoot_at is None:
                     if any(e.sent for e in worker.events()):
                         run("speed", 1.0)

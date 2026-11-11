@@ -35,6 +35,11 @@ def _gold(report_id: str, text: str, hazard: HazardType) -> GoldRecord:
         ("car stalled in the left lane", HazardType.STOPPED),
         ("someone on the wrong side", HazardType.SPEEDING),
         ("nice weather today", N),
+        ("tree fallen on the road", HazardType.OBSTRUCTION),
+        ("car stopped on the flyover", HazardType.STOPPED),
+        ("water logging near the signal", S),
+        ("bike skidded and fell", S),
+        ("what is the time", N),
     ],
 )
 def test_classify_first_hit(text: str, hazard: HazardType) -> None:

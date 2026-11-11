@@ -138,3 +138,51 @@ def test_same_message_same_outcome_and_recipients_that_left_are_lost() -> None:
     assert a == b
     (gone,) = DeliveryModel().deliver(_msg(["not_here"]), world, HAZARD).records
     assert not gone.delivered and gone.latency_ms is None
+
+
+def test_hops_scale_with_the_radius_a_warning_must_cross() -> None:
+    from v2v.sim.delivery import DEFAULT_MODEL, MAX_RADIUS_HOPS, model_for_radius
+
+    assert model_for_radius(800.0) == DEFAULT_MODEL  # 5 hops already cover it
+    assert model_for_radius(2000.0).max_hops == 9
+    assert model_for_radius(5000.0).max_hops == 21
+    assert model_for_radius(500_000.0).max_hops == MAX_RADIUS_HOPS  # capped
+    assert model_for_radius(5000.0).comm_range_m == DEFAULT_MODEL.comm_range_m  # same radio
+
+
+def test_a_5_km_warning_needs_the_extra_hops_to_arrive() -> None:
+    from v2v.contracts import ResolvedLocation, VehicleState, WarningMessage
+    from v2v.sim.delivery import DEFAULT_MODEL, model_for_radius
+
+    cars = [
+        VehicleState(
+            vehicle_id=f"v{i}", x=0.0, y=i * 100.0, edge_id="e", lane_pos_m=0.0,
+            heading_deg=0.0, speed_mps=10.0,
+        )
+        for i in range(60)
+    ]  # fmt: skip
+
+    class World:
+        time_s = 0.0
+
+        def vehicles(self) -> list[VehicleState]:
+            return cars
+
+        def vehicle(self, vid: str) -> VehicleState:
+            return next(c for c in cars if c.vehicle_id == vid)
+
+        def will_reach(self, vid: str, location: ResolvedLocation) -> bool:
+            return True
+
+    msg = WarningMessage(
+        msg_id="m", cluster_id="c", text="t", status="unverified", policy="directional",
+        recipients=tuple(c.vehicle_id for c in cars[1:]), t_sent=0.0,
+    )  # fmt: skip
+    here = ResolvedLocation(edge_id="e", pos_m=0.0, x=0.0, y=0.0, approx=True)
+
+    def farthest(model) -> float:  # type: ignore[no-untyped-def]
+        out = model.deliver(msg, World(), here, "v0")  # type: ignore[arg-type]
+        return max(cars[int(r.vehicle_id[1:])].y for r in out.records if r.delivered)
+
+    assert farthest(DEFAULT_MODEL) < 2500  # 5 hops: about a kilometre or two
+    assert farthest(model_for_radius(5000.0)) > 4000  # 21 hops: across the 5 km

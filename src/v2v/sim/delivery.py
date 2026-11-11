@@ -41,7 +41,7 @@ import heapq
 import math
 import random
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from pydantic import BaseModel, ConfigDict
 
@@ -182,6 +182,22 @@ class DeliveryModel:
 
 
 DEFAULT_MODEL = DeliveryModel()
+
+MAX_RADIUS_HOPS = 30
+RELAY_REACH = 0.8
+"""A relay is assumed to carry a warning about this share of the radio range per
+hop, since reception falls off well before the range itself (P(R) is about 0.42)."""
+
+
+def model_for_radius(radius_m: float, base: DeliveryModel = DEFAULT_MODEL) -> DeliveryModel:
+    """``base`` with enough relay hops to carry a warning across ``radius_m``.
+
+    The default 5 hops cover about 1.2 km, so a geocast that must reach 5 km
+    needs about 21. More hops do not make delivery certain: every hop still has
+    to find a vehicle in radio range, and a gap in traffic ends the chain, which
+    is why far recipients are reached less often than near ones."""
+    needed = math.ceil(radius_m / (RELAY_REACH * base.comm_range_m))
+    return replace(base, max_hops=min(MAX_RADIUS_HOPS, max(base.max_hops, needed)))
 
 
 def deliver(

@@ -34,6 +34,10 @@ SEED_KEYWORDS: dict[HazardType, tuple[str, ...]] = {
         "debris",
         "barricade",
         "fallen tree",
+        "tree fallen",
+        "tree fell",
+        "tree down",
+        "landslide",
         "blocked",
         # animals on the road count as obstructions (docs/annotation_guide.md)
         "animal",
@@ -52,8 +56,25 @@ SEED_KEYWORDS: dict[HazardType, tuple[str, ...]] = {
         "dog",
         "stray",
     ),  # fmt: skip
-    HazardType.SLIPPERY: ("slippery", "waterlogging", "waterlogged", "flooded", "oil spill"),
-    HazardType.STOPPED: ("breakdown", "broke down", "broken down", "stalled", "puncture"),
+    HazardType.SLIPPERY: (
+        "slippery",
+        "waterlogging",
+        "waterlogged",
+        "flooded",
+        "oil spill",
+        "water logging",
+        "skidded",
+        "skid",
+    ),
+    HazardType.STOPPED: (
+        "breakdown",
+        "broke down",
+        "broken down",
+        "stalled",
+        "puncture",
+        "stopped",
+        "stuck",
+    ),
     HazardType.SPEEDING: ("speeding", "overspeeding", "wrong side", "rash driving", "racing"),
 }
 _WORD = re.compile(r"[^\W\d_]+")
